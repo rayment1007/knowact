@@ -1,0 +1,46 @@
+# KnowAct - backend dependencies
+
+# Web framework & ASGI server
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# Database & ORM
+sqlalchemy==2.0.36
+psycopg[binary]==3.2.3
+alembic==1.14.0
+# pgvector: SQLAlchemy ``Vector`` column type + PostgreSQL ANN operators for the
+# CWI document retrieval index (M6.4). Only exercised on PostgreSQL; a portable
+# TypeDecorator maps the same column to JSON on SQLite so tests need no server
+# extension.
+pgvector==0.3.6
+
+# Document parsing for the CWI Document_Service (M6.4). TXT parsing is
+# dependency-free; PDF/DOCX parsing degrades gracefully when a lib is absent.
+pypdf==5.1.0
+python-docx==1.1.2
+
+# Validation & settings
+pydantic==2.10.4
+pydantic-settings==2.7.0
+
+# Optional external LLM provider (only used when AI_PROVIDER=llm).
+# The deterministic MockAIProvider remains the default and needs no key.
+openai>=1.50,<2
+
+# Multipart form parsing for document uploads (POST /api/documents).
+python-multipart==0.0.20
+
+# Auth (JWT bearer tokens + password hashing)
+pyjwt==2.10.1
+# Symmetric encryption (Fernet) for the CWI TokenVault: OAuth access/refresh
+# tokens are encrypted at rest and only ciphertext is ever persisted.
+cryptography==43.0.3
+passlib[bcrypt]==1.7.4
+# passlib 1.7.4 is incompatible with bcrypt >= 4.1 (removed ``__about__`` and
+# changed >72-byte handling), so pin bcrypt to the last compatible release.
+bcrypt==4.0.1
+
+# Testing
+pytest==8.3.4
+hypothesis==6.123.2
+httpx==0.28.1

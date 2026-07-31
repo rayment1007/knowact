@@ -1,0 +1,36 @@
+# Repository-root ignores for KnowAct
+# Per-package .gitignore files (backend/, frontend/) add finer-grained rules.
+
+# --- Secrets / environment (never commit real .env files) -------------------
+backend/.env
+frontend/.env
+.env
+.env.*
+!.env.example
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.hypothesis/
+
+# --- Virtual environments ---------------------------------------------------
+.venv/
+venv/
+
+# --- Node / frontend --------------------------------------------------------
+node_modules/
+dist/
+*.tsbuildinfo
+
+# --- Runtime artifacts ------------------------------------------------------
+# Uploaded document binaries (STORAGE_ROOT). Never source-controlled.
+backend/var/
+var/
+
+# --- Editor / OS ------------------------------------------------------------
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

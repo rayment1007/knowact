@@ -1,0 +1,1 @@
+"""KnowAct backend application package."""

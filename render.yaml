@@ -1,0 +1,80 @@
+# Render blueprint for the KnowAct backend (FastAPI).
+#
+# The frontend is NOT deployed here: it is built and served by Vercel, which
+# proxies `/api/*` back to this service (see vercel.json). That keeps the browser
+# talking to a single origin, so the HTTP-only auth cookie stays same-site.
+#
+# Secrets are deliberately marked `sync: false` so they are never committed:
+# set their values in the Render dashboard (Environment tab) after the first
+# deploy. See DEPLOYMENT.md for the full walkthrough.
+
+services:
+  - type: web
+    name: knowact-api
+    runtime: python
+    plan: free
+    region: singapore
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    # Migrations run on every boot. Alembic is idempotent: if the database is
+    # already at head this is a no-op, so a restart never re-applies anything.
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.7"
+      - key: APP_NAME
+        value: KnowAct
+      # PRODUCTION means an LLM failure returns a retriable 503 instead of
+      # silently downgrading to the deterministic mock provider.
+      - key: MODE
+        value: PRODUCTION
+      - key: AI_PROVIDER
+        value: llm
+      - key: LLM_MODEL
+        value: gpt-4o-mini
+      - key: EMBEDDING_PROVIDER
+        value: openai
+      - key: EMBEDDING_MODEL
+        value: text-embedding-3-small
+      - key: EMBEDDING_DIMENSION
+        value: "1536"
+      - key: STORAGE_BACKEND
+        value: local
+      - key: STORAGE_ROOT
+        value: ./var/storage
+      # The API is only reached through the Vercel rewrite (same origin), so no
+      # cross-origin browser call needs to be allowed.
+      - key: CORS_ORIGINS
+        value: "[]"
+      # HTTPS-only cookie in a deployed environment.
+      - key: AUTH_COOKIE_SECURE
+        value: "true"
+      - key: AUTH_COOKIE_SAMESITE
+        value: lax
+
+      # --- Set these in the Render dashboard (never commit them) ------------
+      # Neon connection string, scheme rewritten to postgresql+psycopg://
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_ID
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_SECRET
+        sync: false
+      # Both must be your public Vercel domain, e.g. https://knowact.vercel.app
+      - key: GOOGLE_OAUTH_REDIRECT_BASE
+        sync: false
+      - key: FRONTEND_BASE_URL
+        sync: false
+      # Only needed if you seed demo data from the Render side; seeding from
+      # your own machine against the Neon URL is simpler.
+      - key: SEED_USER_PASSWORD
+        sync: false

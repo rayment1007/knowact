@@ -1,0 +1,289 @@
+================================================================================
+KnowAct - Setting up on a brand-new machine (Windows)
+================================================================================
+
+This walks through everything a fresh Windows PC needs to run KnowAct locally.
+Follow it top to bottom. Total time is about 30 minutes, most of it downloads.
+
+For deploying to the internet (Neon + Render + Vercel), see DEPLOYMENT.md.
+
+
+--------------------------------------------------------------------------------
+1. WHAT YOU NEED TO INSTALL
+--------------------------------------------------------------------------------
+
+  [1] Python 3.13
+      https://www.python.org/downloads/
+      During install, TICK "Add python.exe to PATH".
+      Verify:  py -3.13 --version      ->  Python 3.13.x
+
+  [2] Node.js 20 LTS or newer
+      https://nodejs.org/
+      Verify:  node --version          ->  v20.x or higher
+               npm --version
+
+  [3] Docker Desktop
+      https://www.docker.com/products/docker-desktop/
+      Needed because the database must have the pgvector extension, and the
+      official Docker image ships with it. A plain PostgreSQL install usually
+      does NOT have pgvector available.
+      Verify:  docker --version
+      Make sure Docker Desktop is RUNNING (whale icon in the system tray).
+
+  [4] Git
+      https://git-scm.com/download/win
+      Verify:  git --version
+
+  [5] A code editor - VS Code is fine
+      https://code.visualstudio.com/
+
+
+--------------------------------------------------------------------------------
+2. ACCOUNTS AND KEYS YOU NEED
+--------------------------------------------------------------------------------
+
+  [A] OpenAI API key
+      - Sign up at https://platform.openai.com/
+      - Add a payment method, then create a key under API keys.
+      - IMPORTANT: set a monthly spending limit so a mistake cannot cost much.
+      - The key looks like:  sk-proj-...
+      - The same key is used for both chat completions and embeddings.
+
+  [B] Google Cloud OAuth client (for Google sign-in, Gmail, Calendar)
+      1. Go to https://console.cloud.google.com/ and create a project.
+      2. APIs & Services -> Library -> enable BOTH:
+             - Gmail API
+             - Google Calendar API
+      3. APIs & Services -> OAuth consent screen:
+             - User type: External
+             - Publishing status: Testing
+             - Under "Test users", ADD YOUR OWN GMAIL ADDRESS.
+               (In Testing mode only listed accounts can sign in.)
+      4. Add these scopes:
+             openid
+             email
+             profile
+             https://www.googleapis.com/auth/gmail.readonly
+             https://www.googleapis.com/auth/gmail.compose
+             https://www.googleapis.com/auth/calendar.events
+             https://www.googleapis.com/auth/calendar.calendarlist.readonly
+      5. APIs & Services -> Credentials -> Create Credentials
+             -> OAuth client ID -> Web application
+         Under "Authorized redirect URIs" add EXACTLY these two:
+
+             http://localhost:8000/api/auth/google/callback
+             http://localhost:8000/api/integrations/callback
+
+         Note the second one: /api/integrations/callback
+         NOT /api/integrations/google/callback. A mismatch here is the most
+         common cause of "redirect_uri_mismatch".
+      6. Copy the Client ID and Client Secret.
+
+  If you skip [A] and [B] the app still runs: set AI_PROVIDER=mock and
+  EMBEDDING_PROVIDER=mock in backend\.env. You get deterministic placeholder AI
+  output and no Google features, but every page loads and every test passes.
+
+
+--------------------------------------------------------------------------------
+3. GET THE CODE
+--------------------------------------------------------------------------------
+
+  Open PowerShell:
+
+      cd C:\Users\<you>\Documents
+      git clone https://github.com/<you>/knowact.git KnowAct
+      cd KnowAct
+
+
+--------------------------------------------------------------------------------
+4. START THE DATABASE
+--------------------------------------------------------------------------------
+
+  Make sure Docker Desktop is running, then from the project root:
+
+      docker compose up -d
+
+  This starts a container named "knowact-postgres" running PostgreSQL 16 with
+  pgvector, published on HOST PORT 5434 (not 5432, so it cannot clash with any
+  PostgreSQL you already have installed).
+
+  Check it:
+
+      docker ps
+
+  You should see knowact-postgres with status "healthy" after a few seconds.
+
+  Useful later:
+      docker compose stop        # stop, keep data
+      docker compose up -d       # start again
+      docker compose down -v     # DELETE the container AND all its data
+
+
+--------------------------------------------------------------------------------
+5. SET UP THE BACKEND
+--------------------------------------------------------------------------------
+
+      cd backend
+      py -3.13 -m venv .venv
+      .venv\Scripts\python -m pip install --upgrade pip
+      .venv\Scripts\python -m pip install -r requirements.txt
+
+  Now create your .env file:
+
+      copy .env.example .env
+
+  Open backend\.env in your editor and fill in:
+
+      DATABASE_URL=postgresql+psycopg://knowact_app:123@localhost:5434/knowact
+      SEED_USER_PASSWORD=<pick any password you will remember>
+      JWT_SECRET=<generate, see below>
+      TOKEN_ENCRYPTION_KEY=<generate, see below>
+      LLM_API_KEY=<your OpenAI key>
+      OPENAI_API_KEY=<the same OpenAI key>
+      GOOGLE_OAUTH_CLIENT_ID=<from Google Cloud>
+      GOOGLE_OAUTH_CLIENT_SECRET=<from Google Cloud>
+
+  Generate the two secrets:
+
+      .venv\Scripts\python -c "import secrets; print(secrets.token_urlsafe(48))"
+      .venv\Scripts\python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+  The first output goes in JWT_SECRET, the second in TOKEN_ENCRYPTION_KEY.
+
+  Create the database schema and load the demo data:
+
+      .venv\Scripts\alembic upgrade head
+      .venv\Scripts\python -m app.seed
+
+  SEED_USER_PASSWORD has no default on purpose. If it is not set, the seeder
+  stops with an error instead of creating accounts with a password that would be
+  visible to anyone reading the source code.
+
+  The seed creates:
+      alex@knowact.app     (ADMIN)
+      sarah@knowact.app    (MEMBER)
+  both using your SEED_USER_PASSWORD.
+
+  Start the API:
+
+      .venv\Scripts\python -m uvicorn app.main:app --reload
+
+  Leave this terminal open. Check http://localhost:8000/api/health in a browser
+  - it should return {"status":"ok"}.
+  Interactive API docs: http://localhost:8000/docs
+
+
+--------------------------------------------------------------------------------
+6. SET UP THE FRONTEND
+--------------------------------------------------------------------------------
+
+  Open a SECOND PowerShell window:
+
+      cd C:\Users\<you>\Documents\KnowAct\frontend
+      npm install
+      npm run dev
+
+  Open http://localhost:5173 and sign in with one of the seeded accounts.
+
+  The dev server proxies /api to http://localhost:8000, so the browser only ever
+  talks to one origin and the auth cookie works without any CORS setup.
+
+
+--------------------------------------------------------------------------------
+7. DAILY STARTUP ORDER
+--------------------------------------------------------------------------------
+
+  Always in this order:
+
+      1)  docker compose up -d                 (from the project root)
+      2)  cd backend
+          .venv\Scripts\python -m uvicorn app.main:app --reload
+      3)  cd frontend
+          npm run dev
+
+  Then open http://localhost:5173
+
+
+--------------------------------------------------------------------------------
+8. RUNNING THE TESTS
+--------------------------------------------------------------------------------
+
+  Backend (307 tests, takes about 5 minutes - the property-based tests each run
+  100+ generated cases):
+
+      cd backend
+      .venv\Scripts\python -m pytest -q
+
+  The tests do NOT need Docker or the database container: they use a temporary
+  in-memory SQLite database. They also never make a real or paid external call -
+  fake Gmail, Calendar, Google OAuth, and OpenAI transports are injected, and no
+  test can send a real email.
+
+  Frontend:
+
+      cd frontend
+      npm run typecheck
+      npm run build
+
+
+--------------------------------------------------------------------------------
+9. TROUBLESHOOTING
+--------------------------------------------------------------------------------
+
+  "I changed .env but nothing happened"
+      --reload only watches Python files, not .env. Stop uvicorn (Ctrl+C) and
+      start it again.
+
+  "connection refused" / backend will not start
+      Docker Desktop is not running, or the container is not up.
+      Run: docker ps      then: docker compose up -d
+
+  "port 5434 is already allocated"
+      Something else grabbed the port. Either stop it, or change BOTH the host
+      port in docker-compose.yml and the port in DATABASE_URL.
+
+  "redirect_uri_mismatch" when signing in with Google
+      The redirect URIs in Google Cloud must match EXACTLY, including http vs
+      https, the port, and the path. Re-read section 2[B] step 5.
+
+  "Could not start authorization" / 500 on connecting Gmail or Calendar
+      GOOGLE_OAUTH_CLIENT_ID or GOOGLE_OAUTH_CLIENT_SECRET is missing or wrong
+      in backend\.env, or you did not restart uvicorn after editing it.
+
+  Google sign-in works but Gmail sync returns 403
+      The scope was not granted. Disconnect the integration in the app, then
+      connect again and accept all requested permissions.
+
+  Copilot returns an error instead of an answer
+      Check LLM_API_KEY. With MODE=DEVELOPMENT an LLM failure falls back to the
+      deterministic mock provider; with MODE=PRODUCTION it returns a 503 so a
+      failure is never silently disguised as a real answer.
+
+  "CREATE EXTENSION vector" fails
+      You are pointed at a plain PostgreSQL install instead of the Docker
+      container. Confirm DATABASE_URL uses port 5434.
+
+  Tests are slow
+      That is by design. Each property-based test runs at least 100 generated
+      examples; lowering that would weaken the guarantees they check.
+
+
+--------------------------------------------------------------------------------
+10. WHERE THINGS LIVE
+--------------------------------------------------------------------------------
+
+  docker-compose.yml            PostgreSQL + pgvector container definition
+  render.yaml                   Backend deployment blueprint (Render)
+  DEPLOYMENT.md                 Neon + GitHub + Render + Vercel walkthrough
+  backend\.env                  Your secrets. NEVER commit this file.
+  backend\.env.example          Template listing every variable
+  backend\app\config.py         All settings, with documentation
+  backend\app\core\             Core Engine (inbox, classify, knowledge, actions)
+  backend\app\modules\cwi\      Google, Gmail, Calendar, documents, Copilot
+  backend\alembic\versions\     Database migrations 0001 -> 0009
+  backend\tests\                Test suite
+  frontend\vercel.json          SPA routing + /api proxy to the backend
+  frontend\src\pages\           One file per screen
+  frontend\src\api\             Typed API client
+
+================================================================================
