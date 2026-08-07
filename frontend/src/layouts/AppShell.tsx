@@ -1,16 +1,21 @@
 // AppShell: the authenticated application chrome.
 //
 // Layout:
-//   - Left sidebar with grouped NavLink navigation (Workspace + Connected
-//     Workspace). Active links are highlighted via NavLink's isActive state.
+//   - Left sidebar with a compact set of primary links and expandable workflow
+//     sections. Active links are highlighted via NavLink's isActive state.
 //   - Topbar showing the current organization and user (from useAuth) plus a
 //     logout action.
 //   - Main content area rendering the matched child route via <Outlet />.
 //   - A footer slot carrying the operational-support disclaimer (Req 12.3),
 //     present on every authenticated page.
 
-import { useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import {
+  NavLink,
+  Outlet,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 import { useAuth } from "@/auth";
 import OperationalSupportDisclaimer from "@/components/OperationalSupportDisclaimer";
 
@@ -21,29 +26,42 @@ interface NavItem {
   end?: boolean;
 }
 
-interface NavGroup {
-  title: string;
+interface NavSection {
+  label: string;
   items: NavItem[];
 }
 
-const NAV_GROUPS: NavGroup[] = [
+const PRIMARY_LINKS: NavItem[] = [
+  { to: "/", label: "Dashboard", end: true },
+  { to: "/copilot", label: "Copilot" },
+];
+
+const NAV_SECTIONS: NavSection[] = [
   {
-    title: "Workspace",
+    label: "Sources",
     items: [
-      { to: "/", label: "Dashboard", end: true },
-      { to: "/source-inbox", label: "Source Inbox" },
+      { to: "/source-inbox", label: "Inbox" },
+      { to: "/gmail", label: "Gmail Sync" },
+      { to: "/documents", label: "Documents" },
+    ],
+  },
+  {
+    label: "Knowledge",
+    items: [
       { to: "/knowledge", label: "Knowledge Hub" },
-      { to: "/actions", label: "Action Center" },
       { to: "/decisions", label: "Decision Memory" },
     ],
   },
   {
-    title: "Connected Workspace",
+    label: "Actions",
     items: [
-      { to: "/copilot", label: "Copilot" },
-      { to: "/gmail", label: "Gmail Sync" },
-      { to: "/email-drafts", label: "Gmail AI Drafts" },
-      { to: "/documents", label: "Documents" },
+      { to: "/actions", label: "Action Center" },
+      { to: "/email-drafts", label: "Gmail Drafts" },
+    ],
+  },
+  {
+    label: "Settings",
+    items: [
       { to: "/integrations", label: "Integrations" },
       { to: "/privacy", label: "Privacy & Data" },
     ],
@@ -56,6 +74,27 @@ function navLinkClass({ isActive }: { isActive: boolean }): string {
   return isActive
     ? `${base} bg-brand-50 text-brand-700`
     : `${base} text-slate-600 hover:bg-slate-100 hover:text-slate-900`;
+}
+
+function childNavLinkClass({ isActive }: { isActive: boolean }): string {
+  const base =
+    "block rounded-md px-3 py-2 text-sm font-medium transition-colors";
+  return isActive
+    ? `${base} bg-brand-50 text-brand-700`
+    : `${base} text-slate-500 hover:bg-slate-100 hover:text-slate-900`;
+}
+
+function sectionButtonClass(isActive: boolean): string {
+  const base =
+    "flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm font-medium transition-colors";
+  return isActive
+    ? `${base} bg-brand-50 text-brand-700`
+    : `${base} text-slate-600 hover:bg-slate-100 hover:text-slate-900`;
+}
+
+function pathMatches(pathname: string, item: NavItem): boolean {
+  if (item.end) return pathname === item.to;
+  return pathname === item.to || pathname.startsWith(`${item.to}/`);
 }
 
 /** Derive up-to-two-letter initials from a full name or email. */
@@ -71,8 +110,18 @@ function initials(nameOrEmail: string): string {
 
 export default function AppShell() {
   const { user, organization, logout } = useAuth();
+  const location = useLocation();
   const navigate = useNavigate();
   const [loggingOut, setLoggingOut] = useState(false);
+  const activeSection =
+    NAV_SECTIONS.find((section) =>
+      section.items.some((item) => pathMatches(location.pathname, item)),
+    )?.label ?? null;
+  const [openSection, setOpenSection] = useState<string | null>(activeSection);
+
+  useEffect(() => {
+    if (activeSection) setOpenSection(activeSection);
+  }, [activeSection]);
 
   async function handleLogout() {
     if (loggingOut) return;
@@ -100,26 +149,81 @@ export default function AppShell() {
           ) : null}
         </div>
 
-        <nav className="flex-1 space-y-6 overflow-y-auto px-3 py-5">
-          {NAV_GROUPS.map((group) => (
-            <div key={group.title}>
-              <div className="px-3 pb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                {group.title}
-              </div>
-              <div className="space-y-1">
-                {group.items.map((item) => (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    end={item.end}
-                    className={navLinkClass}
+        <nav className="flex-1 overflow-y-auto px-3 py-5">
+          <div className="px-3 pb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+            Workspace
+          </div>
+
+          <div className="space-y-1">
+            {PRIMARY_LINKS.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                className={navLinkClass}
+              >
+                {item.label}
+              </NavLink>
+            ))}
+
+            {NAV_SECTIONS.map((section) => {
+              const isOpen = openSection === section.label;
+              const isActive = activeSection === section.label;
+              const sectionId = `sidebar-${section.label.toLowerCase()}`;
+
+              return (
+                <div key={section.label}>
+                  <button
+                    type="button"
+                    className={sectionButtonClass(isActive)}
+                    aria-expanded={isOpen}
+                    aria-controls={sectionId}
+                    onClick={() =>
+                      setOpenSection((current) =>
+                        current === section.label ? null : section.label,
+                      )
+                    }
                   >
-                    {item.label}
-                  </NavLink>
-                ))}
-              </div>
-            </div>
-          ))}
+                    <span>{section.label}</span>
+                    <svg
+                      aria-hidden="true"
+                      viewBox="0 0 20 20"
+                      fill="none"
+                      className={`h-4 w-4 transition-transform ${
+                        isOpen ? "rotate-180" : ""
+                      }`}
+                    >
+                      <path
+                        d="m5 7.5 5 5 5-5"
+                        stroke="currentColor"
+                        strokeWidth="1.75"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+
+                  {isOpen ? (
+                    <div
+                      id={sectionId}
+                      className="ml-3 mt-1 space-y-1 border-l border-slate-200 pl-3"
+                    >
+                      {section.items.map((item) => (
+                        <NavLink
+                          key={item.to}
+                          to={item.to}
+                          className={childNavLinkClass}
+                        >
+                          {item.label}
+                        </NavLink>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+
+          </div>
         </nav>
       </aside>
 
