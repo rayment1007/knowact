@@ -17,6 +17,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Link,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
+import {
   ApiError,
   businessEntitiesApi,
   getErrorMessage,
@@ -126,14 +132,14 @@ function KnowledgeListRow({
 
 interface KnowledgeDetailPanelProps {
   knowledgeId: string;
-  entityName: string | null;
+  entityNameById: ReadonlyMap<string, string>;
   onStatusChanged: (item: KnowledgeItem) => void;
   onDeleted: (knowledgeId: string) => void;
 }
 
 function KnowledgeDetailPanel({
   knowledgeId,
-  entityName,
+  entityNameById,
   onStatusChanged,
   onDeleted,
 }: KnowledgeDetailPanelProps) {
@@ -201,6 +207,9 @@ function KnowledgeDetailPanel({
 
   const { knowledge_item: item, linked_actions, linked_decisions } = detail;
   const isSuggested = item.status === "SUGGESTED";
+  const entityName = item.business_entity_id
+    ? entityNameById.get(item.business_entity_id) ?? "Unknown entity"
+    : null;
 
   async function handleDelete() {
     if (busy) return;
@@ -289,9 +298,12 @@ function KnowledgeDetailPanel({
                 className="rounded-lg border border-slate-200 bg-white p-3"
               >
                 <div className="flex items-start justify-between gap-2">
-                  <span className="text-sm font-medium text-slate-900">
+                  <Link
+                    to={`/actions/${action.id}`}
+                    className="text-sm font-medium text-slate-900 hover:text-brand-700"
+                  >
                     {action.title}
-                  </span>
+                  </Link>
                   <span
                     className={`shrink-0 rounded border px-2 py-0.5 text-[11px] font-medium ${
                       ACTION_STATUS_PILL[action.status] ??
@@ -338,9 +350,12 @@ function KnowledgeDetailPanel({
                 key={decision.id}
                 className="rounded-lg border border-slate-200 bg-white p-3"
               >
-                <div className="text-sm font-medium text-slate-900">
+                <Link
+                  to={`/decisions/${decision.id}`}
+                  className="text-sm font-medium text-slate-900 hover:text-brand-700"
+                >
                   {decision.title}
-                </div>
+                </Link>
                 <p className="mt-1 text-sm text-slate-700">
                   {decision.decision}
                 </p>
@@ -368,14 +383,22 @@ function KnowledgeDetailPanel({
 // ---------------------------------------------------------------------------
 
 export default function KnowledgeHubPage() {
+  const { knowledgeId } = useParams<{ knowledgeId: string }>();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [items, setItems] = useState<KnowledgeItem[]>([]);
   const [entities, setEntities] = useState<BusinessEntity[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [entityFilter, setEntityFilter] = useState<string>("");
+  const businessEntityQuery = searchParams.get("business_entity_id") ?? "";
+  const [entityFilter, setEntityFilter] = useState<string>(businessEntityQuery);
   const [statusFilter, setStatusFilter] = useState<SuggestionStatus | "">("");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedId = knowledgeId ?? null;
+
+  useEffect(() => {
+    setEntityFilter(businessEntityQuery);
+  }, [businessEntityQuery]);
 
   const filters = useMemo(
     () => ({
@@ -414,10 +437,6 @@ export default function KnowledgeHubPage() {
     try {
       const result = await knowledgeApi.list(filters);
       setItems(result);
-      // Keep the selection valid against the freshly loaded, filtered list.
-      setSelectedId((current) =>
-        current && result.some((it) => it.id === current) ? current : null,
-      );
     } catch {
       setError("Could not load the knowledge base. Please retry.");
     } finally {
@@ -435,16 +454,37 @@ export default function KnowledgeHubPage() {
     );
   }, []);
 
-  const handleDeleted = useCallback((knowledgeId: string) => {
-    setItems((current) => current.filter((it) => it.id !== knowledgeId));
-    setSelectedId((current) => (current === knowledgeId ? null : current));
-  }, []);
+  const handleDeleted = useCallback(
+    (deletedKnowledgeId: string) => {
+      setItems((current) =>
+        current.filter((it) => it.id !== deletedKnowledgeId),
+      );
+      if (knowledgeId === deletedKnowledgeId) {
+        const query = searchParams.toString();
+        navigate(`/knowledge${query ? `?${query}` : ""}`, { replace: true });
+      }
+    },
+    [knowledgeId, navigate, searchParams],
+  );
 
-  const selectedEntityName = useMemo(() => {
-    const selected = items.find((it) => it.id === selectedId);
-    if (!selected?.business_entity_id) return null;
-    return entityNameById.get(selected.business_entity_id) ?? null;
-  }, [items, selectedId, entityNameById]);
+  const openKnowledge = useCallback(
+    (id: string) => {
+      const query = searchParams.toString();
+      navigate(`/knowledge/${id}${query ? `?${query}` : ""}`);
+    },
+    [navigate, searchParams],
+  );
+
+  const changeEntityFilter = useCallback(
+    (value: string) => {
+      setEntityFilter(value);
+      const next = new URLSearchParams(searchParams);
+      if (value) next.set("business_entity_id", value);
+      else next.delete("business_entity_id");
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
 
   return (
     <section className="mx-auto max-w-6xl px-6 py-8">
@@ -468,7 +508,7 @@ export default function KnowledgeHubPage() {
           <select
             id="filter-entity"
             value={entityFilter}
-            onChange={(e) => setEntityFilter(e.target.value)}
+            onChange={(e) => changeEntityFilter(e.target.value)}
             className="mt-1 rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-900 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
           >
             <option value="">All entities</option>
@@ -535,7 +575,7 @@ export default function KnowledgeHubPage() {
                       : null
                   }
                   selected={item.id === selectedId}
-                  onSelect={() => setSelectedId(item.id)}
+                  onSelect={() => openKnowledge(item.id)}
                 />
               ))}
             </ul>
@@ -548,7 +588,7 @@ export default function KnowledgeHubPage() {
             <KnowledgeDetailPanel
               key={selectedId}
               knowledgeId={selectedId}
-              entityName={selectedEntityName}
+              entityNameById={entityNameById}
               onStatusChanged={handleStatusChanged}
               onDeleted={handleDeleted}
             />
@@ -560,6 +600,17 @@ export default function KnowledgeHubPage() {
           )}
         </div>
       </div>
+
+      {selectedId ? (
+        <div className="mt-4 text-right">
+          <Link
+            to={`/knowledge${searchParams.toString() ? `?${searchParams.toString()}` : ""}`}
+            className="text-sm font-medium text-brand-600 hover:text-brand-700"
+          >
+            Close details
+          </Link>
+        </div>
+      ) : null}
     </section>
   );
 }

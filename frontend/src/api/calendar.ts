@@ -36,6 +36,10 @@ export const calendarApi = {
   /** List the current user's calendar event links with sync state (28.6). */
   listLinks: () => api.get<CalendarEventLink[]>("/calendar/links"),
 
+  /** Fetch one organization-scoped calendar link for a direct detail route. */
+  getLink: (linkId: string) =>
+    api.get<CalendarEventLink>(`/calendar/links/${linkId}`),
+
   /** Update an existing calendar event in place (Requirement 28.6). */
   updateEvent: (linkId: string, request: CalendarUpdateRequest) =>
     api.patch<CalendarEventLink>(`/calendar/links/${linkId}`, request),

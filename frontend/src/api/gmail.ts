@@ -38,6 +38,10 @@ export const gmailApi = {
     return api.get<EmailMessageRecord[]>(`/gmail/messages${query}`);
   },
 
+  /** Fetch one organization-scoped ingested message for a direct detail route. */
+  getMessage: (recordId: string) =>
+    api.get<EmailMessageRecord>(`/gmail/messages/${recordId}`),
+
   /** List extracted task suggestions (Requirement 27.6). */
   listSuggestions: (recordId?: string) => {
     const query = recordId

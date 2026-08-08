@@ -65,6 +65,23 @@ class DecisionService:
         self.db = db
         self.audit = audit or AuditService(db)
 
+    # -- Read ---------------------------------------------------------------
+
+    def get(self, org_id: UUID, decision_id: UUID) -> DecisionRecord:
+        """Return one org-scoped decision record or raise ``404``.
+
+        The organization predicate is applied in SQL so a missing identifier
+        and a record owned by another organization are indistinguishable.
+        """
+
+        stmt = scope_select(select(DecisionRecord), DecisionRecord, org_id).where(
+            DecisionRecord.id == decision_id
+        )
+        decision = self.db.execute(stmt).scalar_one_or_none()
+        if decision is None:
+            raise not_found("Decision record not found.")
+        return decision
+
     # -- Create (Requirements 9.1, 9.2, 9.4) --------------------------------
 
     def create(

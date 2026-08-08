@@ -64,6 +64,9 @@ export const actionsApi = {
   list: (filters: ActionFilters = {}) =>
     api.get<ActionItem[]>(`/actions${buildActionQuery(filters)}`),
 
+  /** Fetch one organization-scoped action for a direct detail route. */
+  get: (actionId: string) => api.get<ActionItem>(`/actions/${actionId}`),
+
   /**
    * Create an action item (Requirement 8.1). A manual action is recorded with
    * `ai_generated=false`; supplying a confirmed `knowledge_item_id` yields an

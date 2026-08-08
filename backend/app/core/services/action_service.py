@@ -125,6 +125,16 @@ class ActionService:
             )
         return knowledge
 
+    def get(self, org_id: UUID, action_id: UUID) -> ActionItem:
+        """Return one org-scoped action item or raise ``404``.
+
+        This public read path supports direct application deep links without
+        loading the action list and searching it client-side. Missing and
+        cross-organization identifiers intentionally share the same response.
+        """
+
+        return self._get_action(org_id, action_id)
+
     def _persist(
         self,
         org_id: UUID,

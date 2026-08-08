@@ -13,6 +13,7 @@
 // output.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ApiError,
   businessEntitiesApi,
@@ -262,9 +263,12 @@ function DecisionCard({ decision, entityName, busy, onDelete }: DecisionCardProp
   return (
     <li className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-sm font-semibold text-slate-900">
+        <Link
+          to={`/decisions/${decision.id}`}
+          className="text-sm font-semibold text-slate-900 hover:text-brand-700"
+        >
           {decision.title}
-        </span>
+        </Link>
         <span className="text-xs text-slate-400">
           Decided {formatDate(decision.decided_at)}
         </span>
@@ -299,10 +303,16 @@ function DecisionCard({ decision, entityName, busy, onDelete }: DecisionCardProp
 // ---------------------------------------------------------------------------
 
 export default function DecisionMemoryPage() {
+  const { decisionId } = useParams<{ decisionId: string }>();
+  const navigate = useNavigate();
   const [decisions, setDecisions] = useState<DecisionRecord[]>([]);
   const [entities, setEntities] = useState<BusinessEntity[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [openedDecision, setOpenedDecision] =
+    useState<DecisionRecord | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
 
   const [entityFilter, setEntityFilter] = useState<string>("");
 
@@ -310,6 +320,32 @@ export default function DecisionMemoryPage() {
     () => ({ businessEntityId: entityFilter || undefined }),
     [entityFilter],
   );
+
+  const loadOpenedDecision = useCallback(async () => {
+    if (!decisionId) {
+      setOpenedDecision(null);
+      setDetailError(null);
+      return;
+    }
+    setDetailLoading(true);
+    setDetailError(null);
+    try {
+      setOpenedDecision(await decisionsApi.get(decisionId));
+    } catch (err) {
+      setOpenedDecision(null);
+      setDetailError(
+        err instanceof ApiError && err.status === 404
+          ? "This decision could not be found."
+          : "Could not load the opened decision. Please retry.",
+      );
+    } finally {
+      setDetailLoading(false);
+    }
+  }, [decisionId]);
+
+  useEffect(() => {
+    void loadOpenedDecision();
+  }, [loadOpenedDecision]);
 
   // Business entities power the filter dropdown and the form; a load failure
   // here should not block the decision list, so it is best-effort.
@@ -372,6 +408,10 @@ export default function DecisionMemoryPage() {
         setDecisions((current) =>
           current.filter((it) => it.id !== decision.id),
         );
+        if (openedDecision?.id === decision.id) {
+          setOpenedDecision(null);
+          navigate("/decisions", { replace: true });
+        }
       } catch (err) {
         setDeleteError(
           getErrorMessage(err, "Could not delete the decision. Please retry."),
@@ -380,7 +420,7 @@ export default function DecisionMemoryPage() {
         setDeletingId(null);
       }
     },
-    [deletingId],
+    [deletingId, navigate, openedDecision?.id],
   );
 
   return (
@@ -394,6 +434,43 @@ export default function DecisionMemoryPage() {
           their rationale and evidence so the "why" is never lost.
         </p>
       </header>
+
+      {decisionId ? (
+        <section className="mb-6 rounded-xl border border-brand-200 bg-brand-50/40 p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-slate-900">
+              Opened decision
+            </h2>
+            <Link
+              to="/decisions"
+              className="text-xs font-medium text-brand-600 hover:text-brand-700"
+            >
+              Close details
+            </Link>
+          </div>
+          {detailLoading ? (
+            <LoadingState label="Loading decisionâ€¦" />
+          ) : detailError ? (
+            <ErrorState
+              message={detailError}
+              onRetry={() => void loadOpenedDecision()}
+            />
+          ) : openedDecision ? (
+            <ul>
+              <DecisionCard
+                decision={openedDecision}
+                entityName={
+                  openedDecision.business_entity_id
+                    ? entityNameById.get(openedDecision.business_entity_id) ?? null
+                    : null
+                }
+                busy={deletingId === openedDecision.id}
+                onDelete={() => void handleDelete(openedDecision)}
+              />
+            </ul>
+          ) : null}
+        </section>
+      ) : null}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,24rem)_1fr]">
         {/* Record form (Requirement 9.1) */}

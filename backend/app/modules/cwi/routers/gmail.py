@@ -144,6 +144,18 @@ def list_messages(
     return [EmailMessageRecordView.from_record(r) for r in records]
 
 
+@router.get("/messages/{record_id}", response_model=EmailMessageRecordView)
+def get_message(
+    record_id: UUID,
+    service: GmailSyncService = Depends(_service),
+    user: User = Depends(get_current_user),
+) -> EmailMessageRecordView:
+    """Return one org-scoped Gmail record for an email deep link."""
+
+    record = service.get_message_record(user.organization_id, record_id)
+    return EmailMessageRecordView.from_record(record)
+
+
 @router.delete(
     "/messages/{record_id}",
     status_code=status.HTTP_204_NO_CONTENT,

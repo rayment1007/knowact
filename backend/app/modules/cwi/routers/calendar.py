@@ -122,6 +122,20 @@ def list_links(
     return [CalendarEventLinkView.model_validate(link) for link in links]
 
 
+@router.get(
+    "/calendar/links/{link_id}", response_model=CalendarEventLinkView
+)
+def get_link(
+    link_id: UUID,
+    service: CalendarService = Depends(_service),
+    user: User = Depends(get_current_user),
+) -> CalendarEventLinkView:
+    """Return one org-scoped Calendar link for a direct deep link."""
+
+    link = service.get_link(user.organization_id, link_id)
+    return CalendarEventLinkView.model_validate(link)
+
+
 @router.patch(
     "/calendar/links/{link_id}", response_model=CalendarEventLinkView
 )

@@ -44,6 +44,10 @@ export const decisionsApi = {
   list: (filters: DecisionFilters = {}) =>
     api.get<DecisionRecord[]>(`/decisions${buildDecisionQuery(filters)}`),
 
+  /** Fetch one organization-scoped decision for a direct detail route. */
+  get: (decisionId: string) =>
+    api.get<DecisionRecord>(`/decisions/${decisionId}`),
+
   /**
    * Record a decision together with its rationale and supporting evidence
    * (Requirement 9.1). Returns the newly created immutable record.

@@ -14,6 +14,7 @@
 // confirmation. Loading/empty/error states reuse the shared feedback surfaces.
 
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { ApiError, copilotApi } from "@/api";
 import type {
   Citation,
@@ -68,12 +69,12 @@ function CitationList({ citations }: { citations: Citation[] }) {
             <p className="mt-1 line-clamp-3 text-xs text-slate-600">
               {citation.evidence_excerpt}
             </p>
-            <a
-              href={citation.deep_link}
+            <Link
+              to={citation.deep_link}
               className="mt-1 inline-block text-xs font-medium text-brand-600 hover:text-brand-700"
             >
               View source →
-            </a>
+            </Link>
           </li>
         ))}
       </ul>

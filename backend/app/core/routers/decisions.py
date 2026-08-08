@@ -58,6 +58,23 @@ def list_decisions(
     return [DecisionRecordResponse.model_validate(d) for d in decisions]
 
 
+@router.get("/{decision_id}", response_model=DecisionRecordResponse)
+def get_decision(
+    decision_id: UUID,
+    db: Session = Depends(get_db),
+    organization_id: UUID = Depends(get_current_organization_id),
+    _user: User = Depends(get_current_user),
+) -> DecisionRecordResponse:
+    """Return one decision record for a direct Decision Memory deep link.
+
+    A missing record and a record owned by another organization both return
+    ``404``.
+    """
+
+    decision = DecisionService(db).get(organization_id, decision_id)
+    return DecisionRecordResponse.model_validate(decision)
+
+
 @router.post(
     "",
     response_model=DecisionRecordResponse,

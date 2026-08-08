@@ -13,6 +13,7 @@ import DocumentsPage from "@/pages/DocumentsPage";
 import CopilotPage from "@/pages/CopilotPage";
 import EmailDraftsPage from "@/pages/EmailDraftsPage";
 import PrivacyPage from "@/pages/PrivacyPage";
+import VerificationPage from "@/pages/VerificationPage";
 
 // Application routes. All shell routes sit behind ProtectedRoute, which
 // redirects unauthenticated users to /login.
@@ -26,14 +27,21 @@ export default function App() {
           <Route index element={<EnterpriseDashboardPage />} />
           <Route path="source-inbox" element={<SourceInboxPage />} />
           <Route path="knowledge" element={<KnowledgeHubPage />} />
+          <Route path="knowledge/:knowledgeId" element={<KnowledgeHubPage />} />
           <Route path="actions" element={<ActionCenterPage />} />
+          <Route path="actions/:actionId" element={<ActionCenterPage />} />
           <Route path="decisions" element={<DecisionMemoryPage />} />
+          <Route path="decisions/:decisionId" element={<DecisionMemoryPage />} />
           <Route path="integrations" element={<IntegrationsPage />} />
           <Route path="gmail" element={<GmailSyncPage />} />
+          <Route path="emails/:emailId" element={<GmailSyncPage />} />
           <Route path="documents" element={<DocumentsPage />} />
+          <Route path="documents/:documentId" element={<DocumentsPage />} />
+          <Route path="calendar/:calendarLinkId" element={<ActionCenterPage />} />
           <Route path="copilot" element={<CopilotPage />} />
           <Route path="email-drafts" element={<EmailDraftsPage />} />
           <Route path="privacy" element={<PrivacyPage />} />
+          <Route path="verification" element={<VerificationPage />} />
         </Route>
       </Route>
 

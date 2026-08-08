@@ -17,6 +17,7 @@
 // feedback components; suggestions reuse the shared SuggestionCard.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { ApiError, gmailApi, integrationsApi } from "@/api";
 import type {
   AttachmentHandling,
@@ -52,6 +53,60 @@ function describeError(err: unknown, verb: string): string {
     return `Could not ${verb} (${err.status}). Please retry.`;
   }
   return `Could not ${verb}. Please retry.`;
+}
+
+interface EmailMessageCardProps {
+  record: EmailMessageRecord;
+  busy: boolean;
+  onDelete: () => void;
+}
+
+function EmailMessageCard({ record, busy, onDelete }: EmailMessageCardProps) {
+  return (
+    <li className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <Link
+            to={`/emails/${record.id}`}
+            className="block truncate text-sm font-medium text-slate-900 hover:text-brand-700"
+          >
+            {record.subject || "(no subject)"}
+          </Link>
+          <p className="mt-0.5 truncate text-xs text-slate-500">
+            {record.sender} · {formatDateTime(record.received_at)}
+          </p>
+          <p className="mt-1 truncate text-xs text-slate-400">
+            To {record.recipients.join(", ") || "unknown recipient"}
+          </p>
+        </div>
+        <div className="flex shrink-0 flex-col items-end gap-2">
+          <div className="flex flex-wrap justify-end gap-1">
+            {record.labels.map((label) => (
+              <span
+                key={label}
+                className="rounded bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500"
+              >
+                {label}
+              </span>
+            ))}
+            {record.has_attachments ? (
+              <span className="rounded bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">
+                attachment
+              </span>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            onClick={onDelete}
+            disabled={busy}
+            className="text-xs font-medium text-red-500 underline-offset-2 transition hover:text-red-700 hover:underline disabled:opacity-60"
+          >
+            Delete
+          </button>
+        </div>
+      </div>
+    </li>
+  );
 }
 
 interface SyncFormProps {
@@ -310,6 +365,8 @@ function SuggestionItem({
 }
 
 export default function GmailSyncPage() {
+  const { emailId } = useParams<{ emailId: string }>();
+  const navigate = useNavigate();
   const [connections, setConnections] = useState<IntegrationConnection[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<EmailMessageRecord[]>([]);
@@ -320,6 +377,10 @@ export default function GmailSyncPage() {
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [openedMessage, setOpenedMessage] =
+    useState<EmailMessageRecord | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
 
   const [signalPattern, setSignalPattern] = useState("");
   const [signalType, setSignalType] = useState<SenderSignalType>("PERSONAL");
@@ -332,6 +393,32 @@ export default function GmailSyncPage() {
       ),
     [connections],
   );
+
+  const loadOpenedMessage = useCallback(async () => {
+    if (!emailId) {
+      setOpenedMessage(null);
+      setDetailError(null);
+      return;
+    }
+    setDetailLoading(true);
+    setDetailError(null);
+    try {
+      setOpenedMessage(await gmailApi.getMessage(emailId));
+    } catch (err) {
+      setOpenedMessage(null);
+      setDetailError(
+        err instanceof ApiError && err.status === 404
+          ? "This ingested email could not be found."
+          : "Could not load the opened email. Please retry.",
+      );
+    } finally {
+      setDetailLoading(false);
+    }
+  }, [emailId]);
+
+  useEffect(() => {
+    void loadOpenedMessage();
+  }, [loadOpenedMessage]);
 
   const loadConnections = useCallback(async () => {
     setLoading(true);
@@ -421,6 +508,28 @@ export default function GmailSyncPage() {
     [loadIngested],
   );
 
+  const handleRemoveMessage = useCallback(
+    async (record: EmailMessageRecord) => {
+      if (
+        !window.confirm(
+          "Permanently delete this ingested message? Its extracted task suggestions are also deleted. This cannot be undone.",
+        )
+      ) {
+        return;
+      }
+
+      await runSuggestionAction(
+        () => gmailApi.removeMessage(record.id),
+        "delete the message",
+      );
+      if (emailId === record.id) {
+        setOpenedMessage(null);
+        navigate("/gmail", { replace: true });
+      }
+    },
+    [emailId, navigate, runSuggestionAction],
+  );
+
   const handleMarkSignal = useCallback(async () => {
     const pattern = signalPattern.trim();
     if (!pattern) return;
@@ -449,6 +558,38 @@ export default function GmailSyncPage() {
           a task without your confirmation.
         </p>
       </header>
+
+      {emailId ? (
+        <section className="mb-6 rounded-xl border border-brand-200 bg-brand-50/40 p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-slate-900">
+              Opened email
+            </h2>
+            <Link
+              to="/gmail"
+              className="text-xs font-medium text-brand-600 hover:text-brand-700"
+            >
+              Close details
+            </Link>
+          </div>
+          {detailLoading ? (
+            <LoadingState label="Loading email..." />
+          ) : detailError ? (
+            <ErrorState
+              message={detailError}
+              onRetry={() => void loadOpenedMessage()}
+            />
+          ) : openedMessage ? (
+            <ul>
+              <EmailMessageCard
+                record={openedMessage}
+                busy={busy}
+                onDelete={() => void handleRemoveMessage(openedMessage)}
+              />
+            </ul>
+          ) : null}
+        </section>
+      ) : null}
 
       {error ? (
         <ErrorState message={error} onRetry={() => void loadConnections()} />

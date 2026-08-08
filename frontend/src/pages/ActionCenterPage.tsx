@@ -17,6 +17,7 @@
 // output.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ApiError,
   actionsApi,
@@ -111,9 +112,12 @@ function ActionRow({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium text-slate-900">
+            <Link
+              to={`/actions/${action.id}`}
+              className="text-sm font-medium text-slate-900 hover:text-brand-700"
+            >
               {action.title}
-            </span>
+            </Link>
             <span
               className={`shrink-0 rounded border px-2 py-0.5 text-[11px] font-medium ${STATUS_PILL[action.status]}`}
             >
@@ -161,6 +165,14 @@ function ActionRow({
           link={calendarLink}
           onChange={onCalendarChange}
         />
+      ) : null}
+      {calendarLink ? (
+        <Link
+          to={`/calendar/${calendarLink.id}`}
+          className="mt-2 inline-flex text-xs font-medium text-brand-600 hover:text-brand-700"
+        >
+          View calendar sync details
+        </Link>
       ) : null}
     </li>
   );
@@ -371,6 +383,11 @@ function ManualActionForm({ entities, onCreated }: ManualActionFormProps) {
 // ---------------------------------------------------------------------------
 
 export default function ActionCenterPage() {
+  const { actionId, calendarLinkId } = useParams<{
+    actionId: string;
+    calendarLinkId: string;
+  }>();
+  const navigate = useNavigate();
   const [actions, setActions] = useState<ActionItem[]>([]);
   const [entities, setEntities] = useState<BusinessEntity[]>([]);
   const [loading, setLoading] = useState(true);
@@ -380,6 +397,11 @@ export default function ActionCenterPage() {
   const [calendarLinks, setCalendarLinks] = useState<
     Map<string, CalendarEventLink>
   >(new Map());
+  const [openedAction, setOpenedAction] = useState<ActionItem | null>(null);
+  const [openedCalendarLink, setOpenedCalendarLink] =
+    useState<CalendarEventLink | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
 
   const [statusFilter, setStatusFilter] = useState<ActionStatus | "">("");
   const [entityFilter, setEntityFilter] = useState<string>("");
@@ -391,6 +413,47 @@ export default function ActionCenterPage() {
     }),
     [statusFilter, entityFilter],
   );
+
+  const loadOpenedDetail = useCallback(async () => {
+    if (!actionId && !calendarLinkId) {
+      setOpenedAction(null);
+      setOpenedCalendarLink(null);
+      setDetailError(null);
+      return;
+    }
+
+    setDetailLoading(true);
+    setDetailError(null);
+    setOpenedAction(null);
+    setOpenedCalendarLink(null);
+    try {
+      if (actionId) {
+        setOpenedAction(await actionsApi.get(actionId));
+      } else if (calendarLinkId) {
+        const link = await calendarApi.getLink(calendarLinkId);
+        setOpenedCalendarLink(link);
+        if (link.action_item_id) {
+          try {
+            setOpenedAction(await actionsApi.get(link.action_item_id));
+          } catch (err) {
+            if (!(err instanceof ApiError && err.status === 404)) throw err;
+          }
+        }
+      }
+    } catch (err) {
+      setDetailError(
+        err instanceof ApiError && err.status === 404
+          ? "This action or calendar link could not be found."
+          : "Could not load the opened item. Please retry.",
+      );
+    } finally {
+      setDetailLoading(false);
+    }
+  }, [actionId, calendarLinkId]);
+
+  useEffect(() => {
+    void loadOpenedDetail();
+  }, [loadOpenedDetail]);
 
   // Business entities power the filter dropdown and the manual form; a load
   // failure here should not block the action list, so it is best-effort.
@@ -438,6 +501,9 @@ export default function ActionCenterPage() {
       next.set(link.action_item_id as string, link);
       return next;
     });
+    setOpenedCalendarLink((current) =>
+      current?.id === link.id ? link : current,
+    );
   }, []);
 
   const entityNameById = useMemo(() => {
@@ -473,6 +539,9 @@ export default function ActionCenterPage() {
         setActions((current) =>
           current.map((it) => (it.id === updated.id ? updated : it)),
         );
+        setOpenedAction((current) =>
+          current?.id === updated.id ? updated : current,
+        );
       } catch (err) {
         setActionError(getErrorMessage(err, "Could not update the action. Please retry."));
       } finally {
@@ -500,6 +569,11 @@ export default function ActionCenterPage() {
       try {
         await actionsApi.remove(action.id);
         setActions((current) => current.filter((it) => it.id !== action.id));
+        if (openedAction?.id === action.id) {
+          setOpenedAction(null);
+          setOpenedCalendarLink(null);
+          navigate("/actions", { replace: true });
+        }
       } catch (err) {
         setActionError(
           getErrorMessage(err, "Could not delete the action. Please retry."),
@@ -508,7 +582,7 @@ export default function ActionCenterPage() {
         setBusyId(null);
       }
     },
-    [busyId],
+    [busyId, navigate, openedAction?.id],
   );
 
   return (
@@ -526,6 +600,87 @@ export default function ActionCenterPage() {
         </div>
         <ManualActionForm entities={entities} onCreated={handleCreated} />
       </header>
+
+      {actionId || calendarLinkId ? (
+        <section className="mb-6 rounded-xl border border-brand-200 bg-brand-50/40 p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-slate-900">
+              {calendarLinkId ? "Opened calendar link" : "Opened action"}
+            </h2>
+            <Link
+              to="/actions"
+              className="text-xs font-medium text-brand-600 hover:text-brand-700"
+            >
+              Close details
+            </Link>
+          </div>
+
+          {detailLoading ? (
+            <LoadingState label="Loading opened itemâ€¦" />
+          ) : detailError ? (
+            <ErrorState
+              message={detailError}
+              onRetry={() => void loadOpenedDetail()}
+            />
+          ) : (
+            <>
+              {openedCalendarLink ? (
+                <div className="mb-3 rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-600">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium text-slate-900">
+                      Google Calendar sync
+                    </span>
+                    <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
+                      {humanize(openedCalendarLink.sync_status)}
+                    </span>
+                  </div>
+                  <dl className="mt-2 grid gap-1 text-xs sm:grid-cols-2">
+                    <div>
+                      <dt className="inline font-medium text-slate-500">Calendar: </dt>
+                      <dd className="inline">{openedCalendarLink.google_calendar_id}</dd>
+                    </div>
+                    <div>
+                      <dt className="inline font-medium text-slate-500">Last synced: </dt>
+                      <dd className="inline">{formatDate(openedCalendarLink.last_synced_at)}</dd>
+                    </div>
+                  </dl>
+                  {openedCalendarLink.last_error ? (
+                    <p className="mt-2 text-xs text-red-600">
+                      {openedCalendarLink.last_error}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {openedAction ? (
+                <ul>
+                  <ActionRow
+                    action={openedAction}
+                    entityName={
+                      openedAction.business_entity_id
+                        ? entityNameById.get(openedAction.business_entity_id) ?? null
+                        : null
+                    }
+                    busy={busyId === openedAction.id}
+                    onMarkDone={() => void handleMarkDone(openedAction)}
+                    onDelete={() => void handleDelete(openedAction)}
+                    calendarLink={
+                      openedCalendarLink ??
+                      calendarLinks.get(openedAction.id) ??
+                      null
+                    }
+                    onCalendarChange={handleCalendarChange}
+                  />
+                </ul>
+              ) : openedCalendarLink ? (
+                <p className="text-sm text-slate-500">
+                  This calendar link is not attached to an action.
+                </p>
+              ) : null}
+            </>
+          )}
+        </section>
+      ) : null}
 
       {/* Filters (Requirement 8.3) */}
       <div className="mb-6 flex flex-wrap items-end gap-4">

@@ -64,6 +64,23 @@ def list_actions(
     return [ActionItemResponse.model_validate(item) for item in items]
 
 
+@router.get("/{action_id}", response_model=ActionItemResponse)
+def get_action(
+    action_id: UUID,
+    db: Session = Depends(get_db),
+    organization_id: UUID = Depends(get_current_organization_id),
+    _user: User = Depends(get_current_user),
+) -> ActionItemResponse:
+    """Return one action for a direct Action Center deep link.
+
+    A missing action and an action owned by another organization both return
+    ``404`` so the endpoint does not disclose cross-tenant identifiers.
+    """
+
+    action = ActionService(db).get(organization_id, action_id)
+    return ActionItemResponse.model_validate(action)
+
+
 @router.post(
     "",
     response_model=ActionItemResponse,
