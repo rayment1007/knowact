@@ -15,7 +15,7 @@
 // (src/api/knowledge.ts, src/api/businessEntities.ts); there is no hardcoded
 // output.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Link,
   useNavigate,
@@ -148,26 +148,35 @@ function KnowledgeDetailPanel({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const detailRequestGeneration = useRef(0);
 
   const loadDetail = useCallback(async () => {
+    const requestGeneration = ++detailRequestGeneration.current;
     setLoading(true);
     setError(null);
     try {
       const result = await knowledgeApi.getDetail(knowledgeId);
+      if (requestGeneration !== detailRequestGeneration.current) return;
       setDetail(result);
     } catch (err) {
+      if (requestGeneration !== detailRequestGeneration.current) return;
       if (err instanceof ApiError && err.status === 404) {
         setError("This knowledge item could not be found.");
       } else {
         setError("Could not load the knowledge item. Please retry.");
       }
     } finally {
-      setLoading(false);
+      if (requestGeneration === detailRequestGeneration.current) {
+        setLoading(false);
+      }
     }
   }, [knowledgeId]);
 
   useEffect(() => {
     void loadDetail();
+    return () => {
+      detailRequestGeneration.current += 1;
+    };
   }, [loadDetail]);
 
   async function runStatusChange(
@@ -390,6 +399,7 @@ export default function KnowledgeHubPage() {
   const [entities, setEntities] = useState<BusinessEntity[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const listRequestGeneration = useRef(0);
 
   const businessEntityQuery = searchParams.get("business_entity_id") ?? "";
   const [entityFilter, setEntityFilter] = useState<string>(businessEntityQuery);
@@ -432,20 +442,28 @@ export default function KnowledgeHubPage() {
   }, [entities]);
 
   const loadItems = useCallback(async () => {
+    const requestGeneration = ++listRequestGeneration.current;
     setLoading(true);
     setError(null);
     try {
       const result = await knowledgeApi.list(filters);
+      if (requestGeneration !== listRequestGeneration.current) return;
       setItems(result);
     } catch {
+      if (requestGeneration !== listRequestGeneration.current) return;
       setError("Could not load the knowledge base. Please retry.");
     } finally {
-      setLoading(false);
+      if (requestGeneration === listRequestGeneration.current) {
+        setLoading(false);
+      }
     }
   }, [filters]);
 
   useEffect(() => {
     void loadItems();
+    return () => {
+      listRequestGeneration.current += 1;
+    };
   }, [loadItems]);
 
   const handleStatusChanged = useCallback((updated: KnowledgeItem) => {

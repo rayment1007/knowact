@@ -38,6 +38,7 @@ from app.dependencies import get_current_organization, get_current_user
 from app.security import (
     clear_auth_cookie,
     create_access_token,
+    hash_password,
     set_auth_cookie,
     verify_password,
 )
@@ -51,6 +52,10 @@ _INVALID_CREDENTIALS = HTTPException(
     status_code=status.HTTP_401_UNAUTHORIZED,
     detail="Invalid email or password.",
 )
+
+# A fixed non-account hash keeps the unknown-email path computationally
+# equivalent to the wrong-password path and prevents timing enumeration.
+_DUMMY_PASSWORD_HASH = hash_password("knowact-login-timing-placeholder")
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -70,14 +75,18 @@ def login(
     responds ``401`` **without** setting a cookie (Requirement 1.2).
     """
 
+    normalized_email = settings.normalize_auth_email(payload.email)
     user = db.execute(
-        select(User).where(User.email == payload.email)
+        select(User).where(User.email == normalized_email)
     ).scalar_one_or_none()
 
-    # Verifying the password even when the user is unknown is unnecessary here;
-    # verify_password never raises and returns False for a missing user. We do
-    # not distinguish the two cases in the response (see _INVALID_CREDENTIALS).
-    if user is None or not verify_password(payload.password, user.password_hash):
+    password_hash = user.password_hash if user is not None else _DUMMY_PASSWORD_HASH
+    password_matches = verify_password(payload.password, password_hash)
+    if (
+        user is None
+        or not password_matches
+        or not settings.is_auth_email_allowed(normalized_email)
+    ):
         raise _INVALID_CREDENTIALS
 
     token = create_access_token(

@@ -22,7 +22,8 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
@@ -39,7 +40,10 @@ from app.modules.cwi.schemas import (
 )
 from app.modules.cwi.services.calendar_client import CalendarClient, CalendarInfo
 from app.modules.cwi.services.calendar_service import CalendarService
-from app.modules.cwi.services.google_oauth import GoogleOAuthClient
+from app.modules.cwi.services.google_oauth import (
+    GoogleOAuthClient,
+    GoogleOAuthError,
+)
 from app.modules.cwi.services.integration_service import IntegrationService
 
 router = APIRouter(tags=["calendar"])
@@ -79,12 +83,18 @@ def list_calendars(
     connection_id: UUID,
     service: CalendarService = Depends(_service),
     user: User = Depends(get_current_user),
-) -> list[CalendarView]:
+) -> list[CalendarView] | JSONResponse:
     """List the writable calendars for a connection (Requirement 28.3)."""
 
-    calendars = service.list_writable_calendars(
-        user.organization_id, user.id, connection_id
-    )
+    try:
+        calendars = service.list_writable_calendars(
+            user.organization_id, user.id, connection_id
+        )
+    except GoogleOAuthError:
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content={"detail": "Calendar authorization expired. Please reconnect."},
+        )
     return [_calendar_view(c) for c in calendars]
 
 
@@ -132,7 +142,7 @@ def get_link(
 ) -> CalendarEventLinkView:
     """Return one org-scoped Calendar link for a direct deep link."""
 
-    link = service.get_link(user.organization_id, link_id)
+    link = service.get_link(user.organization_id, user.id, link_id)
     return CalendarEventLinkView.model_validate(link)
 
 

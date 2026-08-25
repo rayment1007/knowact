@@ -608,6 +608,7 @@ export interface DocumentAsset {
   mime_type: string;
   checksum: string;
   processing_status: DocumentProcessingStatus;
+  failure_reason: string | null;
   sensitivity: Sensitivity;
   source_deleted: boolean;
   created_at: string;

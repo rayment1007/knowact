@@ -19,11 +19,11 @@ login (:mod:`app.core.routers.auth`) is untouched (Requirement 23.5).
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -38,13 +38,20 @@ from app.modules.cwi.services.google_oauth import (
     GoogleOAuthClient,
     GoogleOAuthError,
 )
-from app.security import create_access_token, hash_password, set_auth_cookie
+from app.security import (
+    clear_auth_cookie,
+    create_access_token,
+    hash_password,
+    set_auth_cookie,
+)
 
 router = APIRouter(prefix="/auth/google", tags=["auth-google"])
 
 # ``purpose`` claim distinguishing a sign-in state from an integration-authz
 # state so neither can be replayed as the other.
 _SIGNIN_STATE_PURPOSE = "cwi_signin"
+_SIGNIN_STATE_COOKIE = "knowact_google_signin_state"
+_SIGNIN_STATE_TTL_SECONDS = 10 * 60
 
 
 def _signin_redirect_uri(settings: Settings) -> str:
@@ -59,26 +66,51 @@ def _frontend_url(settings: Settings, path: str) -> str:
     return f"{base}{path}"
 
 
-def _encode_signin_state(settings: Settings) -> str:
+def _encode_signin_state(settings: Settings, nonce: str) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "purpose": _SIGNIN_STATE_PURPOSE,
-        "nonce": uuid4().hex,
+        "nonce": nonce,
         "iat": now,
+        "exp": now + timedelta(seconds=_SIGNIN_STATE_TTL_SECONDS),
     }
     return jwt.encode(
         payload, settings.jwt_secret, algorithm=settings.jwt_algorithm
     )
 
 
-def _signin_state_is_valid(settings: Settings, state: str) -> bool:
+def _decode_signin_state(settings: Settings, state: str) -> str | None:
     try:
         claims = jwt.decode(
             state, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
         )
     except jwt.InvalidTokenError:
-        return False
-    return claims.get("purpose") == _SIGNIN_STATE_PURPOSE
+        return None
+    nonce = claims.get("nonce")
+    if claims.get("purpose") != _SIGNIN_STATE_PURPOSE or not isinstance(
+        nonce, str
+    ):
+        return None
+    return nonce
+
+
+def _clear_signin_state_cookie(response: Response, settings: Settings) -> None:
+    response.delete_cookie(
+        key=_SIGNIN_STATE_COOKIE,
+        path="/api/auth/google",
+        secure=settings.auth_cookie_secure,
+        samesite=settings.auth_cookie_samesite,
+    )
+
+
+def _signin_failure(settings: Settings) -> RedirectResponse:
+    response = RedirectResponse(
+        url=_frontend_url(settings, "/login?error=google_signin_failed"),
+        status_code=status.HTTP_302_FOUND,
+    )
+    clear_auth_cookie(response, settings=settings)
+    _clear_signin_state_cookie(response, settings)
+    return response
 
 
 def _upsert_google_user(db: Session, identity: GoogleIdentity) -> User:
@@ -90,8 +122,9 @@ def _upsert_google_user(db: Session, identity: GoogleIdentity) -> User:
     never a password). No Gmail/Calendar token is stored here (Requirement 23.4).
     """
 
+    normalized_email = identity.email.strip().casefold()
     user = db.execute(
-        select(User).where(User.email == identity.email)
+        select(User).where(User.email == normalized_email)
     ).scalar_one_or_none()
 
     if user is not None:
@@ -102,14 +135,14 @@ def _upsert_google_user(db: Session, identity: GoogleIdentity) -> User:
         return user
 
     # New identity: provision a workspace for them.
-    org = Organization(name=identity.full_name or identity.email)
+    org = Organization(name=identity.full_name or normalized_email)
     db.add(org)
     db.flush()
 
     user = User(
         organization_id=org.id,
-        email=identity.email,
-        full_name=identity.full_name or identity.email,
+        email=normalized_email,
+        full_name=identity.full_name or normalized_email,
         # Random, unusable password: Google users never log in with a password.
         password_hash=hash_password(secrets.token_urlsafe(32)),
         role="ADMIN",
@@ -121,6 +154,7 @@ def _upsert_google_user(db: Session, identity: GoogleIdentity) -> User:
 
 @router.get("/start", response_model=AuthorizationRedirectResponse)
 def google_signin_start(
+    response: Response,
     settings: Settings = Depends(get_settings),
     oauth: GoogleOAuthClient = Depends(google_oauth_client),
 ) -> AuthorizationRedirectResponse:
@@ -130,7 +164,17 @@ def google_signin_start(
     established and no service scope is requested (Requirements 23.1, 23.3).
     """
 
-    state = _encode_signin_state(settings)
+    nonce = uuid4().hex
+    state = _encode_signin_state(settings, nonce)
+    response.set_cookie(
+        key=_SIGNIN_STATE_COOKIE,
+        value=nonce,
+        max_age=_SIGNIN_STATE_TTL_SECONDS,
+        httponly=True,
+        secure=settings.auth_cookie_secure,
+        samesite=settings.auth_cookie_samesite,
+        path="/api/auth/google",
+    )
     url = oauth.build_signin_url(
         redirect_uri=_signin_redirect_uri(settings), state=state
     )
@@ -139,6 +183,7 @@ def google_signin_start(
 
 @router.get("/callback")
 def google_signin_callback(
+    request: Request,
     code: str,
     state: str,
     db: Session = Depends(get_db),
@@ -155,23 +200,28 @@ def google_signin_callback(
     Gmail/Calendar token is stored (Requirement 23.4).
     """
 
-    failure = RedirectResponse(
-        url=_frontend_url(settings, "/login?error=google_signin_failed"),
-        status_code=status.HTTP_302_FOUND,
-    )
-
-    if not _signin_state_is_valid(settings, state):
-        return failure
+    state_nonce = _decode_signin_state(settings, state)
+    cookie_nonce = request.cookies.get(_SIGNIN_STATE_COOKIE)
+    if (
+        state_nonce is None
+        or cookie_nonce is None
+        or not secrets.compare_digest(state_nonce, cookie_nonce)
+    ):
+        return _signin_failure(settings)
 
     try:
         identity = oauth.exchange_signin_code(
             code=code, redirect_uri=_signin_redirect_uri(settings)
         )
     except GoogleOAuthError:
-        return failure
+        return _signin_failure(settings)
 
-    if not identity.email:
-        return failure
+    if (
+        not identity.email
+        or not identity.email_verified
+        or not settings.is_auth_email_allowed(identity.email)
+    ):
+        return _signin_failure(settings)
 
     user = _upsert_google_user(db, identity)
 
@@ -186,4 +236,5 @@ def google_signin_callback(
         status_code=status.HTTP_302_FOUND,
     )
     set_auth_cookie(redirect, token, settings=settings)
+    _clear_signin_state_cookie(redirect, settings)
     return redirect

@@ -67,13 +67,19 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy import select, update as sa_update
 from sqlalchemy.orm import Session
 
-from app.core.models import ActionItem, KnowledgeItem
+from app.core.models import (
+    ActionItem,
+    ClassificationResult,
+    KnowledgeItem,
+    SourceItem,
+)
 from app.core.services.audit_service import AuditService
 from app.dependencies import not_found, scope_select
 from app.modules.cwi.models import (
     CopilotAnswerLog,
     DocumentAsset,
     DocumentChunk,
+    EmailDraft,
     EmailMessageRecord,
     EmailTaskSuggestion,
     IntegrationConnection,
@@ -166,15 +172,25 @@ class PrivacyService:
     def _target_email_records(
         self,
         org_id: UUID,
+        user_id: UUID,
         *,
         scope: str,
         connection_id: UUID | None,
         record_ids: list[UUID] | None,
     ) -> list[EmailMessageRecord]:
-        """Resolve the org-scoped records to delete for the chosen scope."""
+        """Resolve the current user's records to delete for the chosen scope."""
 
-        stmt = scope_select(
-            select(EmailMessageRecord), EmailMessageRecord, org_id
+        stmt = (
+            scope_select(select(EmailMessageRecord), EmailMessageRecord, org_id)
+            .join(
+                IntegrationConnection,
+                IntegrationConnection.id
+                == EmailMessageRecord.integration_connection_id,
+            )
+            .where(
+                IntegrationConnection.organization_id == org_id,
+                IntegrationConnection.user_id == user_id,
+            )
         )
         normalized = (scope or "ALL").upper()
         if normalized == "CONNECTION":
@@ -216,6 +232,7 @@ class PrivacyService:
 
         records = self._target_email_records(
             org_id,
+            user_id,
             scope=scope,
             connection_id=connection_id,
             record_ids=record_ids,
@@ -283,6 +300,48 @@ class PrivacyService:
             .where(EmailMessageRecord.id.in_(record_ids_resolved))
         )
         result.deleted_records = int(delete_result.rowcount or 0)
+
+        # 6) Remove the raw SourceItem body that Gmail ingestion created. Keep
+        # confirmed knowledge by detaching its provenance first. Restrict this
+        # cleanup to sources created by the current user so a malformed link
+        # can never delete another same-org user's source.
+        owned_source_ids = list(
+            self.db.execute(
+                scope_select(select(SourceItem.id), SourceItem, org_id).where(
+                    SourceItem.id.in_(source_item_ids),
+                    SourceItem.created_by == user_id,
+                )
+            ).scalars()
+        )
+        if owned_source_ids:
+            self.db.execute(
+                sa_update(KnowledgeItem)
+                .where(
+                    KnowledgeItem.organization_id == org_id,
+                    KnowledgeItem.source_item_id.in_(owned_source_ids),
+                )
+                .values(source_item_id=None)
+            )
+            self.db.execute(
+                sa_update(EmailDraft)
+                .where(
+                    EmailDraft.organization_id == org_id,
+                    EmailDraft.user_id == user_id,
+                    EmailDraft.source_item_id.in_(owned_source_ids),
+                )
+                .values(source_item_id=None)
+            )
+            self.db.execute(
+                sa_delete(ClassificationResult).where(
+                    ClassificationResult.source_item_id.in_(owned_source_ids)
+                )
+            )
+            self.db.execute(
+                sa_delete(SourceItem).where(
+                    SourceItem.organization_id == org_id,
+                    SourceItem.id.in_(owned_source_ids),
+                )
+            )
         self.db.flush()
 
         # Exactly one audit row for the whole cascade (Requirement 33.9).
@@ -301,6 +360,7 @@ class PrivacyService:
                     result.marked_documents_source_deleted
                 ),
                 "retained_derived_records": result.retained_derived_records,
+                "deleted_source_items": len(owned_source_ids),
                 "source_item_ids": [str(sid) for sid in source_item_ids],
             },
         )
@@ -461,9 +521,18 @@ class PrivacyService:
 
         # Apply the policy: EXTRACTED_ONLY drops retained raw content.
         if mode == RawEmailRetentionMode.EXTRACTED_ONLY:
+            owned_connection_ids = select(IntegrationConnection.id).where(
+                IntegrationConnection.organization_id == org_id,
+                IntegrationConnection.user_id == user_id,
+            )
             self.db.execute(
                 sa_update(EmailMessageRecord)
                 .where(EmailMessageRecord.organization_id == org_id)
+                .where(
+                    EmailMessageRecord.integration_connection_id.in_(
+                        owned_connection_ids
+                    )
+                )
                 .where(EmailMessageRecord.stored_raw.is_(True))
                 .values(stored_raw=False)
             )
@@ -496,17 +565,20 @@ class PrivacyService:
     # -- What data was used for an AI answer (Requirement 33.7) -------------
 
     def answer_provenance(
-        self, org_id: UUID, answer_id: UUID
+        self, org_id: UUID, user_id: UUID, answer_id: UUID
     ) -> CopilotAnswerLog:
         """Return the persisted answer + its citations/evidence set (33.7).
 
-        Org-scoped: a cross-org/missing answer id is indistinguishable from a
-        genuinely missing one and yields ``404``.
+        User-scoped within the organization: another user's, cross-org, and
+        genuinely missing answer ids are indistinguishable and yield ``404``.
         """
 
         stmt = scope_select(
             select(CopilotAnswerLog), CopilotAnswerLog, org_id
-        ).where(CopilotAnswerLog.id == answer_id)
+        ).where(
+            CopilotAnswerLog.id == answer_id,
+            CopilotAnswerLog.user_id == user_id,
+        )
         log = self.db.execute(stmt).scalar_one_or_none()
         if log is None:
             raise not_found("Answer not found.")

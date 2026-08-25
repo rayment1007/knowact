@@ -37,19 +37,18 @@ class ParsedChunk:
 # focused, citable evidence excerpt.
 _CHUNK_SIZE = 1000
 _CHUNK_OVERLAP = 150
+_MAX_EXTRACTED_CHARS = 5_000_000
+_MAX_PDF_PAGES = 500
 
-
-def _looks_like_pdf(mime_type: str, filename: str) -> bool:
-    return "pdf" in mime_type.lower() or filename.lower().endswith(".pdf")
-
-
-def _looks_like_docx(mime_type: str, filename: str) -> bool:
-    lowered = mime_type.lower()
-    return (
-        "officedocument.wordprocessingml" in lowered
-        or "msword" in lowered
-        or filename.lower().endswith(".docx")
-    )
+_DOCX_MIME = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
+_TEXT_MIME_TYPES = {
+    "text/plain",
+    "text/markdown",
+    "text/csv",
+    "message/rfc822",
+}
 
 
 def parse_document(data: bytes, mime_type: str, filename: str) -> str:
@@ -60,22 +59,42 @@ def parse_document(data: bytes, mime_type: str, filename: str) -> str:
     document ``FAILED`` rather than persisting empty/garbage chunks.
     """
 
-    if _looks_like_pdf(mime_type, filename):
-        return _parse_pdf(data)
-    if _looks_like_docx(mime_type, filename):
-        return _parse_docx(data)
-    # Default: treat as text (covers TXT and plain-text email attachments).
-    return _parse_text(data)
+    del filename  # Dispatch only on the validated effective MIME type.
+    normalized_type = mime_type.split(";", 1)[0].strip().lower()
+    if normalized_type == "application/pdf":
+        text = _parse_pdf(data)
+    elif normalized_type == _DOCX_MIME:
+        text = _parse_docx(data)
+    elif normalized_type in _TEXT_MIME_TYPES:
+        text = _parse_text(data)
+    else:
+        raise DocumentParseError("Unsupported document type.")
+
+    if len(text) > _MAX_EXTRACTED_CHARS:
+        raise DocumentParseError("The extracted document text is too large.")
+    return text
 
 
 def _parse_text(data: bytes) -> str:
-    for encoding in ("utf-8", "utf-16", "latin-1"):
-        try:
-            return data.decode(encoding)
-        except (UnicodeDecodeError, LookupError):
-            continue
-    # Last resort: decode with replacement so we never crash on odd bytes.
-    return data.decode("utf-8", errors="replace")
+    try:
+        if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+            text = data.decode("utf-16", errors="strict")
+        else:
+            text = data.decode("utf-8-sig", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise DocumentParseError(
+            "Text documents must use UTF-8 or BOM-marked UTF-16."
+        ) from exc
+
+    if "\ufffd" in text or "\x00" in text:
+        raise DocumentParseError("The text document contains invalid characters.")
+    disallowed_controls = sum(
+        ord(character) < 32 and character not in "\n\r\t\f"
+        for character in text
+    )
+    if disallowed_controls:
+        raise DocumentParseError("The text document contains invalid characters.")
+    return text
 
 
 def _parse_pdf(data: bytes) -> str:
@@ -88,7 +107,11 @@ def _parse_pdf(data: bytes) -> str:
 
     try:
         reader = PdfReader(io.BytesIO(data))
+        if len(reader.pages) > _MAX_PDF_PAGES:
+            raise DocumentParseError("The PDF has too many pages to process.")
         pages = [page.extract_text() or "" for page in reader.pages]
+    except DocumentParseError:
+        raise
     except Exception as exc:  # pypdf raises a variety of read errors
         raise DocumentParseError("Could not parse the PDF document.") from exc
     return "\n\n".join(pages)

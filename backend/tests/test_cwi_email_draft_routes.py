@@ -11,8 +11,9 @@ compose-scope gate, token safety, auth, and cross-org 404 isolation.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import UUID
 
 import pytest
 from cryptography.fernet import Fernet
@@ -22,7 +23,9 @@ from app.config import Settings, get_settings
 from app.core import models as core_models
 from app.core.models import KnowledgeItem, SuggestionStatus
 from app.modules.cwi.dependencies import gmail_client, google_oauth_client
-from app.modules.cwi.services.gmail_client import FakeGmailClient
+from app.modules.cwi.models import IntegrationConnection
+from app.modules.cwi.models import ConnectionStatus, IntegrationConnection
+from app.modules.cwi.services.gmail_client import FakeGmailClient, GmailClientError
 from app.modules.cwi.services.google_oauth import (
     GMAIL_COMPOSE_SCOPE,
     GMAIL_READONLY_SCOPE,
@@ -99,6 +102,32 @@ def _request_draft(
     resp = client.post("/api/email-drafts", json=payload)
     assert resp.status_code == 200, resp.text
     return resp.json()
+
+
+def test_disconnected_gmail_connection_cannot_start_email_draft(
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+    fake_gmail: FakeGmailClient,
+) -> None:
+    _login(cwi_client, seeded_user)
+    connection_id = _connect_gmail(cwi_client)
+    assert cwi_client.post(
+        f"/api/integrations/{connection_id}/disconnect"
+    ).status_code == 200
+    calls_before = fake_gmail.create_draft_calls
+
+    response = cwi_client.post(
+        "/api/email-drafts",
+        json={
+            "connection_id": connection_id,
+            "purpose": "follow up",
+            "tone": "professional",
+            "to_recipients": ["client@example.com"],
+        },
+    )
+
+    assert response.status_code == 403
+    assert fake_gmail.create_draft_calls == calls_before
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +307,42 @@ def test_create_gmail_draft_before_approve_conflicts(
     assert resp.status_code == 409
 
 
+def test_ambiguous_gmail_draft_creation_is_terminal_and_persists(
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+    fake_gmail: FakeGmailClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _login(cwi_client, seeded_user)
+    connection_id = _connect_gmail(cwi_client)
+    draft_id = _request_draft(cwi_client, connection_id)["id"]
+    cwi_client.post(f"/api/email-drafts/{draft_id}/approve")
+    create_attempts = 0
+
+    def ambiguous_create_failure(**_kwargs: Any) -> str:
+        nonlocal create_attempts
+        create_attempts += 1
+        raise GmailClientError("Simulated ambiguous Gmail transport failure.")
+
+    monkeypatch.setattr(fake_gmail, "create_draft", ambiguous_create_failure)
+
+    failed = cwi_client.post(f"/api/email-drafts/{draft_id}/create-gmail-draft")
+    assert failed.status_code == 502
+    assert "Check Gmail Drafts" in failed.json()["detail"]
+    assert create_attempts == 1
+
+    detail = cwi_client.get(f"/api/email-drafts/{draft_id}")
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "FAILED"
+    assert any("Check Gmail Drafts" in item for item in detail.json()["warnings"])
+
+    # Gmail does not provide an idempotency guarantee for draft creation. Once
+    # the result is ambiguous, a second blind create is refused locally.
+    retry = cwi_client.post(f"/api/email-drafts/{draft_id}/create-gmail-draft")
+    assert retry.status_code == 409
+    assert create_attempts == 1
+
+
 # ---------------------------------------------------------------------------
 # Send: separate explicit confirmation + idempotency
 # ---------------------------------------------------------------------------
@@ -348,6 +413,84 @@ def test_send_is_idempotent(
     assert len(audits) == 1
 
 
+def test_send_failure_persists_failed_status(
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+    fake_gmail: FakeGmailClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _login(cwi_client, seeded_user)
+    connection_id = _connect_gmail(cwi_client)
+    draft_id = _request_draft(cwi_client, connection_id)["id"]
+    cwi_client.post(f"/api/email-drafts/{draft_id}/approve")
+    send_attempts = 0
+
+    def ambiguous_send_failure(**_kwargs: Any) -> str:
+        nonlocal send_attempts
+        send_attempts += 1
+        raise GmailClientError("Simulated ambiguous Gmail transport failure.")
+
+    monkeypatch.setattr(fake_gmail, "send_draft", ambiguous_send_failure)
+
+    failed = cwi_client.post(
+        f"/api/email-drafts/{draft_id}/send", json={"confirm": True}
+    )
+    assert failed.status_code == 502
+    assert "Check Gmail Sent" in failed.json()["detail"]
+    assert send_attempts == 1
+
+    detail = cwi_client.get(f"/api/email-drafts/{draft_id}")
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "FAILED"
+    assert any("Check Gmail Sent" in item for item in detail.json()["warnings"])
+
+    # An ambiguous transport outcome is terminal locally: a blind retry could
+    # duplicate a message that Gmail actually accepted before the response was
+    # lost, so the backend refuses it without another external call.
+    retry = cwi_client.post(
+        f"/api/email-drafts/{draft_id}/send", json={"confirm": True}
+    )
+    assert retry.status_code == 409
+    assert send_attempts == 1
+
+
+def test_oauth_failure_before_send_restores_sendable_status(
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+    db_session: Any,
+    fake_gmail: FakeGmailClient,
+) -> None:
+    _login(cwi_client, seeded_user)
+    connection_id = _connect_gmail(cwi_client)
+    draft_id = _request_draft(cwi_client, connection_id)["id"]
+    cwi_client.post(f"/api/email-drafts/{draft_id}/approve")
+
+    # Force token acquisition to fail before GmailClient.send_draft is reached.
+    connection = db_session.get(IntegrationConnection, UUID(connection_id))
+    assert connection is not None
+    connection.token_expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    db_session.add(connection)
+    db_session.flush()
+    failing_oauth = FakeGoogleOAuthClient(fail_refresh=True)
+    cwi_client.app.dependency_overrides[google_oauth_client] = lambda: failing_oauth
+
+    failed = cwi_client.post(
+        f"/api/email-drafts/{draft_id}/send", json={"confirm": True}
+    )
+    assert failed.status_code == 502
+    assert "reconnect Gmail and retry" in failed.json()["detail"]
+    assert failing_oauth.refresh_calls == 1
+    assert fake_gmail.send_calls == 0
+
+    # The normal response commits both safe states across the request boundary:
+    # the draft is still sendable and the integration records expiry.
+    detail = cwi_client.get(f"/api/email-drafts/{draft_id}")
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "USER_APPROVED"
+    db_session.refresh(connection)
+    assert connection.status == ConnectionStatus.EXPIRED
+
+
 def test_send_from_gmail_draft_created(
     cwi_client: TestClient, seeded_user: dict[str, Any], fake_gmail: FakeGmailClient
 ) -> None:
@@ -371,26 +514,26 @@ def test_send_from_gmail_draft_created(
 
 
 def test_compose_scope_required_for_gmail_draft(
-    client: TestClient, seeded_user: dict[str, Any]
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+    fake_gmail: FakeGmailClient,
+    db_session: Any,
 ) -> None:
-    # A Gmail connection WITHOUT the incremental compose scope.
-    fake_gmail = FakeGmailClient()
-    test_settings = Settings(token_encryption_key=_TEST_KEY, ai_provider="mock")
-    client.app.dependency_overrides[get_settings] = lambda: test_settings
-    client.app.dependency_overrides[google_oauth_client] = lambda: (
-        FakeGoogleOAuthClient(grant=_compose_grant([GMAIL_READONLY_SCOPE]))
-    )
-    client.app.dependency_overrides[gmail_client] = lambda: fake_gmail
-
-    _login(client, seeded_user)
-    connection_id = _connect_gmail(client)
-    draft_id = _request_draft(client, connection_id)["id"]
-    client.post(f"/api/email-drafts/{draft_id}/approve")
+    _login(cwi_client, seeded_user)
+    connection_id = _connect_gmail(cwi_client)
+    # Simulate a legacy/externally-reduced grant. New callbacks reject partial
+    # grants, but every consuming service must still fail closed for existing
+    # rows whose permissions have changed.
+    connection = db_session.query(IntegrationConnection).one()
+    connection.granted_scopes_json = [GMAIL_READONLY_SCOPE]
+    db_session.flush()
+    draft_id = _request_draft(cwi_client, connection_id)["id"]
+    cwi_client.post(f"/api/email-drafts/{draft_id}/approve")
 
     # Creating a Gmail draft / sending is gated behind gmail.compose.
-    created = client.post(f"/api/email-drafts/{draft_id}/create-gmail-draft")
+    created = cwi_client.post(f"/api/email-drafts/{draft_id}/create-gmail-draft")
     assert created.status_code == 403
-    sent = client.post(
+    sent = cwi_client.post(
         f"/api/email-drafts/{draft_id}/send", json={"confirm": True}
     )
     assert sent.status_code == 403

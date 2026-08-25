@@ -26,6 +26,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
@@ -49,7 +50,10 @@ from app.modules.cwi.schemas import (
 )
 from app.modules.cwi.services.gmail_client import GmailClient
 from app.modules.cwi.services.gmail_sync_service import GmailSyncService, SyncRun
-from app.modules.cwi.services.google_oauth import GoogleOAuthClient
+from app.modules.cwi.services.google_oauth import (
+    GoogleOAuthClient,
+    GoogleOAuthError,
+)
 from app.modules.cwi.services.integration_service import IntegrationService
 
 router = APIRouter(prefix="/gmail", tags=["gmail"])
@@ -106,7 +110,7 @@ def initial_sync(
     options: InitialSyncOptions,
     service: GmailSyncService = Depends(_service),
     user: User = Depends(get_current_user),
-) -> SyncRunResponse:
+) -> SyncRunResponse | JSONResponse:
     """Start the first Gmail import with the given options (Req 26.1-26.6).
 
     An invalid options payload is rejected with ``422`` by request validation
@@ -114,9 +118,15 @@ def initial_sync(
     cross-org/missing connection yields ``404``.
     """
 
-    run = service.start_initial_sync(
-        user.organization_id, user.id, connection_id, options
-    )
+    try:
+        run = service.start_initial_sync(
+            user.organization_id, user.id, connection_id, options
+        )
+    except GoogleOAuthError:
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content={"detail": "Gmail authorization expired. Please reconnect."},
+        )
     return _run_response(run)
 
 
@@ -125,10 +135,16 @@ def sync_now(
     connection_id: UUID,
     service: GmailSyncService = Depends(_service),
     user: User = Depends(get_current_user),
-) -> SyncRunResponse:
+) -> SyncRunResponse | JSONResponse:
     """Run a manual incremental sync; dedup keeps it idempotent (Req 27.8)."""
 
-    run = service.sync_now(user.organization_id, user.id, connection_id)
+    try:
+        run = service.sync_now(user.organization_id, user.id, connection_id)
+    except GoogleOAuthError:
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content={"detail": "Gmail authorization expired. Please reconnect."},
+        )
     return _run_response(run)
 
 
@@ -140,7 +156,9 @@ def list_messages(
 ) -> list[EmailMessageRecordView]:
     """List the organization's ingested email records (Requirement 27.9)."""
 
-    records = service.list_message_records(user.organization_id, connection_id)
+    records = service.list_message_records(
+        user.organization_id, user.id, connection_id
+    )
     return [EmailMessageRecordView.from_record(r) for r in records]
 
 
@@ -152,7 +170,9 @@ def get_message(
 ) -> EmailMessageRecordView:
     """Return one org-scoped Gmail record for an email deep link."""
 
-    record = service.get_message_record(user.organization_id, record_id)
+    record = service.get_message_record(
+        user.organization_id, user.id, record_id
+    )
     return EmailMessageRecordView.from_record(record)
 
 
@@ -184,7 +204,9 @@ def list_suggestions(
 ) -> list[EmailTaskSuggestionView]:
     """List extracted task suggestions for the organization (Requirement 27.6)."""
 
-    suggestions = service.list_task_suggestions(user.organization_id, record_id)
+    suggestions = service.list_task_suggestions(
+        user.organization_id, user.id, record_id
+    )
     return [EmailTaskSuggestionView.model_validate(s) for s in suggestions]
 
 
@@ -219,6 +241,7 @@ def edit_suggestion(
     fields = set(payload.model_dump(exclude_unset=True).keys())
     suggestion = service.edit_task_suggestion(
         user.organization_id,
+        user.id,
         suggestion_id,
         title=payload.title,
         description=payload.description,
@@ -243,7 +266,7 @@ def reject_suggestion(
     """Reject a task suggestion, retaining it as a negative signal (27.7)."""
 
     suggestion = service.reject_task_suggestion(
-        user.organization_id, suggestion_id
+        user.organization_id, user.id, suggestion_id
     )
     return EmailTaskSuggestionView.model_validate(suggestion)
 
@@ -260,7 +283,7 @@ def dismiss_suggestion(
     """Dismiss a task suggestion (Requirement 27.7)."""
 
     suggestion = service.dismiss_task_suggestion(
-        user.organization_id, suggestion_id
+        user.organization_id, user.id, suggestion_id
     )
     return EmailTaskSuggestionView.model_validate(suggestion)
 

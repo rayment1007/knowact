@@ -22,6 +22,7 @@ from app.modules.cwi.dependencies import embedding_provider, storage_backend
 from app.modules.cwi.models import DocumentAsset, DocumentChunk
 from app.modules.cwi.services.embedding import FakeEmbeddingProvider
 from app.modules.cwi.services.storage import LocalFilesystemStorage
+from app.modules.cwi.services.upload_validation import MAX_DOCUMENT_UPLOAD_BYTES
 
 _DIM = 64
 
@@ -241,3 +242,106 @@ def test_cross_org_document_returns_404(
     assert cwi_client.get(f"/api/documents/{doc_id}").status_code == 404
     assert cwi_client.post(f"/api/documents/{doc_id}/process").status_code == 404
     assert cwi_client.delete(f"/api/documents/{doc_id}").status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("filename", "body", "content_type", "expected_status"),
+    [
+        ("empty.txt", b"", "text/plain", 400),
+        ("payload.exe", b"hello", "application/octet-stream", 415),
+        ("renamed.txt", b"\x89PNG\r\n\x1a\ncontent", "text/plain", 415),
+        ("notes.txt", b"hello", "application/pdf", 415),
+    ],
+)
+def test_upload_rejects_invalid_files_without_creating_asset(
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+    db_session: Any,
+    filename: str,
+    body: bytes,
+    content_type: str,
+    expected_status: int,
+) -> None:
+    _login(cwi_client, seeded_user)
+    response = _upload(
+        cwi_client,
+        filename=filename,
+        body=body,
+        content_type=content_type,
+    )
+    assert response.status_code == expected_status
+    assert db_session.query(DocumentAsset).count() == 0
+
+
+def test_upload_rejects_oversized_file_without_creating_asset(
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+    db_session: Any,
+) -> None:
+    _login(cwi_client, seeded_user)
+    response = _upload(
+        cwi_client,
+        filename="large.txt",
+        body=b"a" * (MAX_DOCUMENT_UPLOAD_BYTES + 1),
+        content_type="text/plain",
+    )
+    assert response.status_code == 413
+    assert db_session.query(DocumentAsset).count() == 0
+
+
+def test_failed_processing_is_visible_with_safe_reason(
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+) -> None:
+    _login(cwi_client, seeded_user)
+    uploaded = _upload(
+        cwi_client,
+        filename="invalid.pdf",
+        body=b"%PDF-1.7\nnot a real PDF",
+        content_type="application/pdf",
+    )
+    assert uploaded.status_code == 201
+    document_id = uploaded.json()["id"]
+
+    processed = cwi_client.post(f"/api/documents/{document_id}/process")
+    assert processed.status_code == 422
+    assert processed.json()["detail"]
+
+    detail = cwi_client.get(f"/api/documents/{document_id}")
+    assert detail.status_code == 200
+    assert detail.json()["processing_status"] == "FAILED"
+    assert detail.json()["failure_reason"]
+
+
+def test_same_org_user_cannot_access_another_users_document(
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+    db_session: Any,
+) -> None:
+    _login(cwi_client, seeded_user)
+    document_id = _upload(cwi_client).json()["id"]
+
+    from app.security import hash_password
+
+    other_user = core_models.User(
+        organization_id=seeded_user["organization"].id,
+        email="other-same-org@example.com",
+        full_name="Other Same Org User",
+        password_hash=hash_password("pw2"),
+        role="MEMBER",
+    )
+    db_session.add(other_user)
+    db_session.flush()
+
+    cwi_client.cookies.clear()
+    assert cwi_client.post(
+        "/api/auth/login",
+        json={"email": other_user.email, "password": "pw2"},
+    ).status_code == 200
+
+    listed = cwi_client.get("/api/documents")
+    assert listed.status_code == 200
+    assert listed.json() == []
+    assert cwi_client.get(f"/api/documents/{document_id}").status_code == 404
+    assert cwi_client.post(f"/api/documents/{document_id}/process").status_code == 404
+    assert cwi_client.delete(f"/api/documents/{document_id}").status_code == 404

@@ -2,7 +2,7 @@
 
 Exposes the AI draft lifecycle over HTTP: request an AI draft, edit it, approve
 or reject it, materialize a real Gmail draft, and — via a *separate* explicit
-confirmation — send it exactly once.
+confirmation — send it with local duplicate-send guards.
 
 Every route is protected by :func:`app.dependencies.get_current_user`
 (missing/invalid session → ``401``) and scoped to the caller's organization, so
@@ -26,6 +26,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
@@ -40,9 +41,16 @@ from app.modules.cwi.schemas import (
     EmailDraftSendRequest,
     EmailDraftView,
 )
-from app.modules.cwi.services.email_draft_service import EmailDraftService
+from app.modules.cwi.services.email_draft_service import (
+    EmailDraftCreateError,
+    EmailDraftSendError,
+    EmailDraftService,
+)
 from app.modules.cwi.services.gmail_client import GmailClient
-from app.modules.cwi.services.google_oauth import GoogleOAuthClient
+from app.modules.cwi.services.google_oauth import (
+    GoogleOAuthClient,
+    GoogleOAuthError,
+)
 from app.modules.cwi.services.integration_service import IntegrationService
 
 router = APIRouter(prefix="/email-drafts", tags=["email-drafts"])
@@ -104,7 +112,7 @@ def get_draft(
 ) -> EmailDraftView:
     """Return a single draft; a cross-org/missing id yields ``404``."""
 
-    draft = service.get_draft(user.organization_id, draft_id)
+    draft = service.get_draft(user.organization_id, user.id, draft_id)
     return EmailDraftView.from_draft(draft)
 
 
@@ -170,7 +178,7 @@ def create_gmail_draft(
     draft_id: UUID,
     service: EmailDraftService = Depends(_service),
     user: User = Depends(get_current_user),
-) -> EmailDraftView:
+) -> EmailDraftView | JSONResponse:
     """Create a Gmail draft from an approved draft (Requirement 32.6).
 
     Requires the incremental ``gmail.compose`` scope; without it the call yields
@@ -178,7 +186,21 @@ def create_gmail_draft(
     transaction.
     """
 
-    draft = service.create_gmail_draft(user.organization_id, user.id, draft_id)
+    try:
+        draft = service.create_gmail_draft(
+            user.organization_id, user.id, draft_id
+        )
+    except EmailDraftCreateError as exc:
+        # A normal response commits the terminal, reconcilable failure state.
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content={"detail": str(exc)},
+        )
+    except GoogleOAuthError:
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content={"detail": "Gmail authorization expired. Please reconnect."},
+        )
     return EmailDraftView.from_draft(draft)
 
 
@@ -188,15 +210,24 @@ def send_draft(
     payload: EmailDraftSendRequest,
     service: EmailDraftService = Depends(_service),
     user: User = Depends(get_current_user),
-) -> EmailDraftView:
+) -> EmailDraftView | JSONResponse:
     """Send the draft after a separate explicit confirmation (Req 32.7, 32.8).
 
     ``confirm`` must be ``true`` or the send is rejected (``400``). The send is
-    idempotent: a retried/concurrent send returns the existing sent message id
-    without producing a duplicate (Property 17).
+    locally guarded: a concurrent request observing ``SENDING``/``SENT`` does
+    not issue another Gmail call. An ambiguous transport failure is terminal
+    until the user checks Gmail Sent.
     """
 
-    draft = service.send_draft(
-        user.organization_id, user.id, draft_id, confirm=payload.confirm
-    )
+    try:
+        draft = service.send_draft(
+            user.organization_id, user.id, draft_id, confirm=payload.confirm
+        )
+    except EmailDraftSendError as exc:
+        # A normal response lets the request transaction commit FAILED instead
+        # of rolling it back with the exception.
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content={"detail": str(exc)},
+        )
     return EmailDraftView.from_draft(draft)

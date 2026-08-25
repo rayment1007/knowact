@@ -286,6 +286,13 @@ export default function IntegrationsPage() {
 
   const handleRevoke = useCallback(
     async (connection: IntegrationConnection) => {
+      if (
+        !window.confirm(
+          `Revoke Google access for ${connection.account_email}? Sync will stop and reconnecting will require authorization again.`,
+        )
+      ) {
+        return;
+      }
       setBusyService(connection.service);
       setActionError(null);
       try {

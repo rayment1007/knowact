@@ -92,6 +92,7 @@ If `git status` lists any `.env`, stop and remove it from the index
    | Variable | Value |
    | --- | --- |
    | `DATABASE_URL` | the Neon URL with the `postgresql+psycopg://` scheme |
+   | `AUTH_ALLOWED_EMAILS` | a JSON array containing exactly your owner email, e.g. `["you@example.com"]` |
    | `JWT_SECRET` | `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
    | `TOKEN_ENCRYPTION_KEY` | `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
    | `LLM_API_KEY` | your OpenAI key |
@@ -101,8 +102,10 @@ If `git status` lists any `.env`, stop and remove it from the index
    | `GOOGLE_OAUTH_REDIRECT_BASE` | your Vercel domain (fill in after step 4) |
    | `FRONTEND_BASE_URL` | your Vercel domain (fill in after step 4) |
 
-   Use a **fresh** `JWT_SECRET` and `TOKEN_ENCRYPTION_KEY` for production — do
-   not reuse the ones in your local `.env`.
+   Set `AUTH_ALLOWED_EMAILS` before the first production boot; KnowAct fails
+   closed when it is missing, empty, or contains more than one address. Use a
+   **fresh** `JWT_SECRET` and `TOKEN_ENCRYPTION_KEY` for production — do not
+   reuse the ones in your local `.env`.
 
 4. Deploy. Note the service URL, e.g. `https://knowact-api.onrender.com`.
    Check `https://<render-url>/api/health` returns `{"status":"ok"}`.
@@ -148,7 +151,8 @@ Note the second path is `/api/integrations/callback` — not
 
 Confirm on the OAuth consent screen:
 
-- Publishing status **Testing** is fine; add your own Gmail under **Test users**.
+- Publishing status **Testing** is fine; add the same Gmail address configured
+  in `AUTH_ALLOWED_EMAILS` under **Test users**.
 - Enabled APIs: **Gmail API**, **Google Calendar API**.
 - Scopes: `openid`, `email`, `profile`, `gmail.readonly`, `gmail.compose`,
   `calendar.events`, `calendar.calendarlist.readonly`.
@@ -157,7 +161,8 @@ Confirm on the OAuth consent screen:
 
 ## Step 6 — Verify
 
-1. Open the Vercel URL and sign in with a seeded user.
+1. Open the Vercel URL and sign in with the owner account configured in
+   `AUTH_ALLOWED_EMAILS`.
 2. Integrations → connect Gmail, then connect Calendar. Both should return to the
    SPA with a success banner.
 3. Gmail Sync → run a sync. Messages appear.

@@ -12,7 +12,7 @@
 // (src/api/decisions.ts, src/api/businessEntities.ts); there is no hardcoded
 // output.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ApiError,
@@ -313,6 +313,8 @@ export default function DecisionMemoryPage() {
     useState<DecisionRecord | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const listRequestGeneration = useRef(0);
+  const detailRequestGeneration = useRef(0);
 
   const [entityFilter, setEntityFilter] = useState<string>("");
 
@@ -322,16 +324,21 @@ export default function DecisionMemoryPage() {
   );
 
   const loadOpenedDecision = useCallback(async () => {
+    const requestGeneration = ++detailRequestGeneration.current;
     if (!decisionId) {
       setOpenedDecision(null);
       setDetailError(null);
+      setDetailLoading(false);
       return;
     }
     setDetailLoading(true);
     setDetailError(null);
     try {
-      setOpenedDecision(await decisionsApi.get(decisionId));
+      const result = await decisionsApi.get(decisionId);
+      if (requestGeneration !== detailRequestGeneration.current) return;
+      setOpenedDecision(result);
     } catch (err) {
+      if (requestGeneration !== detailRequestGeneration.current) return;
       setOpenedDecision(null);
       setDetailError(
         err instanceof ApiError && err.status === 404
@@ -339,12 +346,17 @@ export default function DecisionMemoryPage() {
           : "Could not load the opened decision. Please retry.",
       );
     } finally {
-      setDetailLoading(false);
+      if (requestGeneration === detailRequestGeneration.current) {
+        setDetailLoading(false);
+      }
     }
   }, [decisionId]);
 
   useEffect(() => {
     void loadOpenedDecision();
+    return () => {
+      detailRequestGeneration.current += 1;
+    };
   }, [loadOpenedDecision]);
 
   // Business entities power the filter dropdown and the form; a load failure
@@ -371,20 +383,28 @@ export default function DecisionMemoryPage() {
   }, [entities]);
 
   const loadDecisions = useCallback(async () => {
+    const requestGeneration = ++listRequestGeneration.current;
     setLoading(true);
     setError(null);
     try {
       const result = await decisionsApi.list(filters);
+      if (requestGeneration !== listRequestGeneration.current) return;
       setDecisions(result);
     } catch {
+      if (requestGeneration !== listRequestGeneration.current) return;
       setError("Could not load decisions. Please retry.");
     } finally {
-      setLoading(false);
+      if (requestGeneration === listRequestGeneration.current) {
+        setLoading(false);
+      }
     }
   }, [filters]);
 
   useEffect(() => {
     void loadDecisions();
+    return () => {
+      listRequestGeneration.current += 1;
+    };
   }, [loadDecisions]);
 
   const handleCreated = useCallback((created: DecisionRecord) => {
@@ -449,7 +469,7 @@ export default function DecisionMemoryPage() {
             </Link>
           </div>
           {detailLoading ? (
-            <LoadingState label="Loading decisionâ€¦" />
+            <LoadingState label="Loading decision…" />
           ) : detailError ? (
             <ErrorState
               message={detailError}

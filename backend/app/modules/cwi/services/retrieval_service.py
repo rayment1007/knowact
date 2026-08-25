@@ -169,8 +169,8 @@ class RetrievalService:
         The org / source-type / sensitivity filters are applied as SQL ``WHERE``
         predicates before ranking; the survivors are then ranked by cosine
         similarity to the query embedding (in Python) and the bounded top ``k``
-        is returned. ``user_id`` is accepted for future per-user permission
-        rules and to make the permission-scoped signature explicit.
+        is returned. Documents are restricted to the current uploader so a
+        second user in the same organization cannot retrieve personal files.
         """
 
         filters = filters or RetrievalFilters()
@@ -201,6 +201,7 @@ class RetrievalService:
             )
             # Tenant isolation on the asset too (Property 13).
             .where(DocumentAsset.organization_id == org_id)
+            .where(DocumentAsset.uploaded_by == user_id)
             # Only indexed, non-deleted documents are retrievable.
             .where(
                 DocumentAsset.processing_status
@@ -219,7 +220,10 @@ class RetrievalService:
         if asset_ids:
             asset_stmt = scope_select(
                 select(DocumentAsset), DocumentAsset, org_id
-            ).where(DocumentAsset.id.in_(asset_ids))
+            ).where(
+                DocumentAsset.id.in_(asset_ids),
+                DocumentAsset.uploaded_by == user_id,
+            )
             assets = {
                 asset.id: asset
                 for asset in self.db.execute(asset_stmt).scalars().all()

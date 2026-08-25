@@ -14,7 +14,7 @@
 // All data flows through the real Core Engine API (src/api/sourceItems.ts);
 // there is no hardcoded output.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { ApiError, getErrorMessage, parseFieldErrors, sourceItemsApi } from "@/api";
 import type {
@@ -256,6 +256,7 @@ function SourceItemCard({ item, onItemChanged, onDeleted }: SourceItemCardProps)
   const [detail, setDetail] = useState<SourceItemDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const detailRequestGeneration = useRef(0);
 
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -273,19 +274,30 @@ function SourceItemCard({ item, onItemChanged, onDeleted }: SourceItemCardProps)
   const [extractRefusal, setExtractRefusal] = useState<string | null>(null);
 
   const loadDetail = useCallback(async () => {
+    const requestGeneration = ++detailRequestGeneration.current;
     setLoadingDetail(true);
     setDetailError(null);
     try {
       const result = await sourceItemsApi.get(item.id);
+      if (requestGeneration !== detailRequestGeneration.current) return;
       setDetail(result);
       // Keep the parent list in sync with any status change.
       onItemChanged(result.source_item);
     } catch {
+      if (requestGeneration !== detailRequestGeneration.current) return;
       setDetailError("Could not load item details. Please retry.");
     } finally {
-      setLoadingDetail(false);
+      if (requestGeneration === detailRequestGeneration.current) {
+        setLoadingDetail(false);
+      }
     }
   }, [item.id, onItemChanged]);
+
+  useEffect(() => {
+    return () => {
+      detailRequestGeneration.current += 1;
+    };
+  }, [item.id]);
 
   function toggleExpanded() {
     const next = !expanded;
@@ -672,6 +684,7 @@ export default function SourceInboxPage() {
   const [items, setItems] = useState<SourceItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const listRequestGeneration = useRef(0);
 
   const [statusFilter, setStatusFilter] = useState<SourceStatus | "">("");
   const [categoryFilter, setCategoryFilter] = useState<BusinessCategory | "">("");
@@ -685,20 +698,28 @@ export default function SourceInboxPage() {
   );
 
   const loadItems = useCallback(async () => {
+    const requestGeneration = ++listRequestGeneration.current;
     setLoading(true);
     setError(null);
     try {
       const result = await sourceItemsApi.list(filters);
+      if (requestGeneration !== listRequestGeneration.current) return;
       setItems(result);
     } catch {
+      if (requestGeneration !== listRequestGeneration.current) return;
       setError("Could not load the inbox. Please retry.");
     } finally {
-      setLoading(false);
+      if (requestGeneration === listRequestGeneration.current) {
+        setLoading(false);
+      }
     }
   }, [filters]);
 
   useEffect(() => {
     void loadItems();
+    return () => {
+      listRequestGeneration.current += 1;
+    };
   }, [loadItems]);
 
   const handleCreated = useCallback((item: SourceItem) => {

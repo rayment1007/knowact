@@ -9,6 +9,7 @@ token-safety of every response.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -19,7 +20,12 @@ from app.config import Settings, get_settings
 from app.core import models as core_models
 from app.modules.cwi.dependencies import google_oauth_client
 from app.modules.cwi.models import ConnectionStatus
-from app.modules.cwi.services.google_oauth import FakeGoogleOAuthClient
+from app.modules.cwi.services.google_oauth import (
+    GMAIL_COMPOSE_SCOPE,
+    GMAIL_READONLY_SCOPE,
+    FakeGoogleOAuthClient,
+    GoogleTokenGrant,
+)
 
 _TEST_KEY = Fernet.generate_key().decode()
 # Token columns/fields that must never surface in a response body.
@@ -93,11 +99,56 @@ def test_connect_callback_creates_connected_connection(
     assert view["service"] == "GMAIL"
     assert view["account_email"] == "abc@example.com"
     assert view["granted_scopes"] == [
-        "https://www.googleapis.com/auth/gmail.readonly"
+        GMAIL_READONLY_SCOPE,
+        GMAIL_COMPOSE_SCOPE,
     ]
     # No token field is ever present.
     for field in _FORBIDDEN_FIELDS:
         assert field not in view
+
+
+def test_service_authorization_requests_identity_and_capability_scopes(
+    cwi_client: TestClient, seeded_user: dict[str, Any]
+) -> None:
+    _login(cwi_client, seeded_user)
+
+    response = cwi_client.post("/api/integrations/GMAIL/connect")
+    url = response.json()["authorization_url"]
+
+    assert response.status_code == 200
+    assert "openid" in url and "email" in url and "profile" in url
+    assert "gmail.readonly" in url and "gmail.compose" in url
+
+
+def test_callback_rejects_partial_scope_grant_without_persisting_connection(
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+    db_session: Any,
+) -> None:
+    _login(cwi_client, seeded_user)
+    begin = cwi_client.post("/api/integrations/GMAIL/connect")
+    partial = GoogleTokenGrant(
+        access_token="access-partial",
+        refresh_token="refresh-partial",
+        expires_at=datetime.now(timezone.utc).replace(year=2999),
+        granted_scopes=[GMAIL_READONLY_SCOPE],
+        external_account_id="google-sub-partial",
+        account_email="partial@example.com",
+    )
+    cwi_client.app.dependency_overrides[google_oauth_client] = lambda: (
+        FakeGoogleOAuthClient(grant=partial)
+    )
+
+    callback = cwi_client.get(
+        "/api/integrations/callback",
+        params={"code": "abc", "state": begin.json()["state"]},
+        follow_redirects=False,
+    )
+
+    assert "/integrations?error=connect_failed" in callback.headers["location"]
+    from app.modules.cwi.models import IntegrationConnection
+
+    assert db_session.query(IntegrationConnection).count() == 0
 
 
 def test_connect_writes_connect_integration_audit(

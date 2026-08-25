@@ -53,7 +53,10 @@ from app.dependencies import not_found, scope_select
 from app.modules.cwi.models import (
     CalendarEventLink,
     CalendarSyncStatus,
+    ConnectionStatus,
     IntegrationConnection,
+    IntegrationProvider,
+    IntegrationService as IntegrationServiceEnum,
 )
 from app.modules.cwi.schemas import (
     CalendarAddRequest,
@@ -65,6 +68,11 @@ from app.modules.cwi.services.calendar_client import (
     CalendarClientError,
     CalendarEventInput,
     CalendarInfo,
+)
+from app.modules.cwi.services.google_oauth import (
+    CALENDAR_CALENDARLIST_READONLY_SCOPE,
+    CALENDAR_EVENTS_SCOPE,
+    GoogleOAuthError,
 )
 from app.modules.cwi.services.integration_service import IntegrationService
 
@@ -141,7 +149,12 @@ class CalendarService:
     # -- Scoped lookups -----------------------------------------------------
 
     def _get_connection(
-        self, org_id: UUID, connection_id: UUID, user_id: UUID | None = None
+        self,
+        org_id: UUID,
+        connection_id: UUID,
+        user_id: UUID | None = None,
+        *,
+        required_scopes: tuple[str, ...] = (CALENDAR_EVENTS_SCOPE,),
     ) -> IntegrationConnection:
         stmt = scope_select(
             select(IntegrationConnection), IntegrationConnection, org_id
@@ -151,6 +164,22 @@ class CalendarService:
         connection = self.db.execute(stmt).scalar_one_or_none()
         if connection is None:
             raise not_found("Integration connection not found.")
+        missing_scopes = set(required_scopes).difference(
+            connection.granted_scopes_json or []
+        )
+        if (
+            connection.provider != IntegrationProvider.GOOGLE
+            or connection.service != IntegrationServiceEnum.GOOGLE_CALENDAR
+            or connection.status != ConnectionStatus.CONNECTED
+            or missing_scopes
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "A connected Google Calendar account with the required "
+                    "authorization is needed. Reconnect Calendar and try again."
+                ),
+            )
         return connection
 
     def _get_action(self, org_id: UUID, action_id: UUID) -> ActionItem:
@@ -162,12 +191,17 @@ class CalendarService:
             raise not_found("Action item not found.")
         return action
 
-    def _get_link(self, org_id: UUID, link_id: UUID) -> CalendarEventLink:
-        """Return an org-scoped link or ``404`` (Requirement 28.10 / P13)."""
+    def _get_link(
+        self, org_id: UUID, user_id: UUID, link_id: UUID
+    ) -> CalendarEventLink:
+        """Return an org-and-user-scoped link or ``404``."""
 
         stmt = scope_select(
             select(CalendarEventLink), CalendarEventLink, org_id
-        ).where(CalendarEventLink.id == link_id)
+        ).where(
+            CalendarEventLink.id == link_id,
+            CalendarEventLink.user_id == user_id,
+        )
         link = self.db.execute(stmt).scalar_one_or_none()
         if link is None:
             raise not_found("Calendar event link not found.")
@@ -194,7 +228,14 @@ class CalendarService:
             )
         return self.db.execute(stmt).scalars().first()
 
-    def _access_token(self, org_id: UUID, connection_id: UUID) -> str:
+    def _access_token(
+        self,
+        org_id: UUID,
+        user_id: UUID,
+        connection_id: UUID,
+        *,
+        required_scopes: tuple[str, ...] = (CALENDAR_EVENTS_SCOPE,),
+    ) -> str:
         """Obtain a valid (refreshed) access token, or a transient empty one.
 
         The token exists only transiently in memory for the outbound Calendar
@@ -205,7 +246,11 @@ class CalendarService:
 
         if self._integration_service is not None:
             return self._integration_service.get_valid_access_token(
-                org_id, connection_id
+                org_id,
+                user_id,
+                connection_id,
+                expected_service=IntegrationServiceEnum.GOOGLE_CALENDAR,
+                required_scopes=required_scopes,
             )
         return ""
 
@@ -278,8 +323,19 @@ class CalendarService:
         yields ``404``.
         """
 
-        self._get_connection(org_id, connection_id, user_id)
-        token = self._access_token(org_id, connection_id)
+        list_scope = (CALENDAR_CALENDARLIST_READONLY_SCOPE,)
+        self._get_connection(
+            org_id,
+            connection_id,
+            user_id,
+            required_scopes=list_scope,
+        )
+        token = self._access_token(
+            org_id,
+            user_id,
+            connection_id,
+            required_scopes=list_scope,
+        )
         return self.calendar.list_calendars(access_token=token)
 
     def add_action_to_calendar(
@@ -352,17 +408,17 @@ class CalendarService:
         external event was created), leaving it retriable.
         """
 
-        token = self._access_token(org_id, connection_id)
         try:
+            token = self._access_token(org_id, user_id, connection_id)
             event_id = self.calendar.create_event(
                 access_token=token,
                 calendar_id=link.google_calendar_id,
                 event=event,
                 idempotency_key=link.idempotency_key,
             )
-        except CalendarClientError as exc:
+        except (CalendarClientError, GoogleOAuthError):
             link.sync_status = CalendarSyncStatus.FAILED
-            link.last_error = str(exc)
+            link.last_error = "Calendar sync failed. Please retry or reconnect."
             self.db.add(link)
             self.db.flush()
             return link
@@ -408,7 +464,7 @@ class CalendarService:
         failure marks the link ``FAILED`` (retriable) with a secret-free error.
         """
 
-        link = self._get_link(org_id, link_id)
+        link = self._get_link(org_id, user_id, link_id)
         if link.google_event_id is None:
             raise _conflict("Cannot update an event that has not been created.")
 
@@ -423,17 +479,19 @@ class CalendarService:
         self.db.add(link)
         self.db.flush()
 
-        token = self._access_token(org_id, link.integration_connection_id)
         try:
+            token = self._access_token(
+                org_id, user_id, link.integration_connection_id
+            )
             self.calendar.update_event(
                 access_token=token,
                 calendar_id=link.google_calendar_id,
                 event_id=link.google_event_id,
                 event=event,
             )
-        except CalendarClientError as exc:
+        except (CalendarClientError, GoogleOAuthError):
             link.sync_status = CalendarSyncStatus.FAILED
-            link.last_error = str(exc)
+            link.last_error = "Calendar sync failed. Please retry or reconnect."
             self.db.add(link)
             self.db.flush()
             return link
@@ -465,27 +523,42 @@ class CalendarService:
 
         Deletes the event (when one was created) and marks the link
         ``CANCELLED``, writing exactly one ``CANCEL_CALENDAR_EVENT`` audit row in
-        the same transaction. A transport failure marks the link ``FAILED``
-        (retriable) with a secret-free error.
+        the same transaction. If Google does not confirm the deletion, the link
+        remains ``CANCEL_PENDING`` with a secret-free error. This preserves the
+        operation being retried: a retry must delete again, never update the
+        event merely because a ``google_event_id`` is present.
         """
 
-        link = self._get_link(org_id, link_id)
+        link = self._get_link(org_id, user_id, link_id)
+
+        # A completed cancellation is locally idempotent. Do not issue a
+        # second external delete or write a duplicate audit row.
+        if link.sync_status == CalendarSyncStatus.CANCELLED:
+            return link
 
         link.sync_status = CalendarSyncStatus.CANCEL_PENDING
         self.db.add(link)
         self.db.flush()
 
-        token = self._access_token(org_id, link.integration_connection_id)
         try:
+            token = self._access_token(
+                org_id, user_id, link.integration_connection_id
+            )
             if link.google_event_id is not None:
                 self.calendar.delete_event(
                     access_token=token,
                     calendar_id=link.google_calendar_id,
                     event_id=link.google_event_id,
                 )
-        except CalendarClientError as exc:
-            link.sync_status = CalendarSyncStatus.FAILED
-            link.last_error = str(exc)
+        except (CalendarClientError, GoogleOAuthError):
+            # Keep the intended operation explicit. A generic FAILED state plus
+            # an existing event id is indistinguishable from a failed update and
+            # previously caused retry() to call update_event instead of delete.
+            link.sync_status = CalendarSyncStatus.CANCEL_PENDING
+            link.last_error = (
+                "Calendar cancellation was not confirmed. "
+                "Please retry or reconnect."
+            )
             self.db.add(link)
             self.db.flush()
             return link
@@ -515,14 +588,22 @@ class CalendarService:
     ) -> CalendarEventLink:
         """Retry a failed sync (Requirement 28.6).
 
-        Re-attempts the operation that failed: a create when no
-        ``google_event_id`` exists yet, otherwise an update. A link that is not
-        ``FAILED`` is returned unchanged (nothing to retry). A successful retry
-        transitions the link to ``SYNCED`` and writes exactly one audit row
-        matching the operation performed.
+        Re-attempts the operation that failed: a pending cancellation is always
+        retried as a delete; otherwise a ``FAILED`` link is retried as a create
+        when no ``google_event_id`` exists yet, or an update when one exists. A
+        link in any other state is returned unchanged. A successful retry writes
+        exactly one audit row matching the operation performed.
         """
 
-        link = self._get_link(org_id, link_id)
+        link = self._get_link(org_id, user_id, link_id)
+
+        # Preserve cancellation intent across an ambiguous transport failure.
+        # HttpCalendarClient treats 404/410 as a successful delete, making this
+        # retry safe when Google deleted the event but the first response was
+        # lost.
+        if link.sync_status == CalendarSyncStatus.CANCEL_PENDING:
+            return self.cancel_event(org_id, user_id, link_id)
+
         if link.sync_status != CalendarSyncStatus.FAILED:
             return link
 
@@ -598,17 +679,17 @@ class CalendarService:
             recurrence=req.recurrence or "RRULE:FREQ=DAILY",
         )
 
-        token = self._access_token(org_id, connection.id)
         try:
+            token = self._access_token(org_id, user_id, connection.id)
             event_id = self.calendar.create_event(
                 access_token=token,
                 calendar_id=link.google_calendar_id,
                 event=event,
                 idempotency_key=link.idempotency_key,
             )
-        except CalendarClientError as exc:
+        except (CalendarClientError, GoogleOAuthError):
             link.sync_status = CalendarSyncStatus.FAILED
-            link.last_error = str(exc)
+            link.last_error = "Calendar sync failed. Please retry or reconnect."
             self.db.add(link)
             self.db.flush()
             return link
@@ -651,10 +732,12 @@ class CalendarService:
         )
         return list(self.db.execute(stmt).scalars().all())
 
-    def get_link(self, org_id: UUID, link_id: UUID) -> CalendarEventLink:
-        """Return a single org-scoped link or ``404`` (Requirement 28.10)."""
+    def get_link(
+        self, org_id: UUID, user_id: UUID, link_id: UUID
+    ) -> CalendarEventLink:
+        """Return a single org-and-user-scoped link or ``404``."""
 
-        return self._get_link(org_id, link_id)
+        return self._get_link(org_id, user_id, link_id)
 
 
 __all__ = [

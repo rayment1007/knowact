@@ -131,9 +131,11 @@ def _check_isolation(
     _assert_cross_org_404(lambda: service.get_connection(other_org, conn_id))
 
     # get_valid_access_token is org-scoped too (read of the secret material).
-    assert service.get_valid_access_token(owner_org, conn_id)
+    assert service.get_valid_access_token(owner_org, owner.user.id, conn_id)
     _assert_cross_org_404(
-        lambda: service.get_valid_access_token(other_org, conn_id)
+        lambda: service.get_valid_access_token(
+            other_org, other.user.id, conn_id
+        )
     )
 
     # -- Write: cross-org disconnect/revoke refused (404) -------------------

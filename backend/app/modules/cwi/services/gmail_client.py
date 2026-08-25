@@ -36,22 +36,18 @@ logger = logging.getLogger(__name__)
 def _log_gmail_error(operation: str, exc: Exception) -> None:
     """Log the underlying Gmail API failure for diagnosis (secret-free).
 
-    The Bearer access token lives only in the request header, never in the
-    response, so logging the Gmail API response status + body is safe and does
-    not leak credentials. This surfaces the real reason a Gmail call failed
-    (e.g. an invalid recipient, an insufficient-scope 403, or a malformed
-    message) which the caller otherwise wraps in a generic message.
+    Provider response bodies can contain message or recipient data, so only a
+    status code and exception class are recorded.
     """
 
     if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
         logger.error(
-            "Gmail %s failed: HTTP %s -> %s",
+            "Gmail %s failed: HTTP %s",
             operation,
             exc.response.status_code,
-            exc.response.text[:1000],
         )
     else:
-        logger.error("Gmail %s failed: %r", operation, exc)
+        logger.error("Gmail %s failed: %s", operation, type(exc).__name__)
 
 #: Base URL for the Gmail REST API v1, scoped to the authorized mailbox.
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -149,9 +145,10 @@ class GmailClient(Protocol):
     ) -> str:
         """Send a draft (``users.drafts.send``) and return the sent message id.
 
-        The ``idempotency_key`` makes sending safe under retry: repeating a send
-        with the same key resolves to the same sent message id rather than
-        producing a duplicate (Requirement 32.8 / Property 17).
+        ``idempotency_key`` is a local correlation key. The fake transport
+        honors it deterministically, but Gmail's HTTP send endpoint does not
+        provide the same idempotency guarantee; callers must treat an ambiguous
+        production failure as non-retriable until the Sent mailbox is checked.
         """
 
 
@@ -236,8 +233,7 @@ class FakeGmailClient:
         idempotency_key: str,
         draft_id: str | None = None,
     ) -> str:
-        # A repeated send with the same key resolves to the same sent message id
-        # — the fake never fabricates a duplicate send (Property 17).
+        # Test-only deterministic behavior: repeated keys resolve to one result.
         existing = self._sent_by_key.get(idempotency_key)
         if existing is not None:
             return existing

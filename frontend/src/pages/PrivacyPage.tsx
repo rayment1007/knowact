@@ -269,13 +269,20 @@ export default function PrivacyPage() {
                       </button>
                       <button
                         type="button"
-                        onClick={() =>
+                        onClick={() => {
+                          if (
+                            !window.confirm(
+                              `Revoke Google access for ${c.account_email}? Sync will stop and reconnecting will require authorization again.`,
+                            )
+                          ) {
+                            return;
+                          }
                           void runAction(
                             () => integrationsApi.revoke(c.connection_id),
                             "revoke Google access",
                             "Google access revoked and disconnected locally.",
-                          )
-                        }
+                          );
+                        }}
                         disabled={busy}
                         className="rounded-md border border-rose-300 px-3 py-1.5 text-sm font-medium text-rose-700 transition hover:bg-rose-50 disabled:opacity-60"
                       >

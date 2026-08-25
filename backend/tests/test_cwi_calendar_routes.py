@@ -22,7 +22,12 @@ from app.core import models as core_models
 from app.core.models import ActionItem, ActionStatus
 from app.modules.cwi.dependencies import calendar_client, google_oauth_client
 from app.modules.cwi.services.calendar_client import CalendarClientError, FakeCalendarClient
-from app.modules.cwi.services.google_oauth import FakeGoogleOAuthClient
+from app.modules.cwi.services.google_oauth import (
+    CALENDAR_CALENDARLIST_READONLY_SCOPE,
+    CALENDAR_EVENTS_SCOPE,
+    FakeGoogleOAuthClient,
+    GoogleTokenGrant,
+)
 
 _TEST_KEY = Fernet.generate_key().decode()
 _FORBIDDEN_FIELDS = ("access_token_encrypted", "refresh_token_encrypted")
@@ -33,6 +38,20 @@ def fake_calendar() -> FakeCalendarClient:
     return FakeCalendarClient()
 
 
+def _calendar_grant() -> GoogleTokenGrant:
+    return GoogleTokenGrant(
+        access_token="access-calendar",
+        refresh_token="refresh-calendar",
+        expires_at=datetime.now(timezone.utc).replace(year=2999),
+        granted_scopes=[
+            CALENDAR_EVENTS_SCOPE,
+            CALENDAR_CALENDARLIST_READONLY_SCOPE,
+        ],
+        external_account_id="google-sub-calendar",
+        account_email="calendar@example.com",
+    )
+
+
 @pytest.fixture()
 def cwi_client(
     client: TestClient,
@@ -41,7 +60,7 @@ def cwi_client(
     test_settings = Settings(token_encryption_key=_TEST_KEY, ai_provider="mock")
     client.app.dependency_overrides[get_settings] = lambda: test_settings
     client.app.dependency_overrides[google_oauth_client] = (
-        lambda: FakeGoogleOAuthClient()
+        lambda: FakeGoogleOAuthClient(grant=_calendar_grant())
     )
     client.app.dependency_overrides[calendar_client] = lambda: fake_calendar
     return client
@@ -86,6 +105,27 @@ def _make_action(
     db_session.add(action)
     db_session.flush()
     return action
+
+
+def test_disconnected_calendar_connection_is_rejected_before_external_call(
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+    fake_calendar: FakeCalendarClient,
+    monkeypatch: Any,
+) -> None:
+    _login(cwi_client, seeded_user)
+    connection_id = _connect_calendar(cwi_client)
+    assert cwi_client.post(
+        f"/api/integrations/{connection_id}/disconnect"
+    ).status_code == 200
+
+    def _unexpected_call(*, access_token: str) -> list[Any]:
+        raise AssertionError("Calendar transport must not be called")
+
+    monkeypatch.setattr(fake_calendar, "list_calendars", _unexpected_call)
+    response = cwi_client.get(f"/api/calendar/{connection_id}/calendars")
+
+    assert response.status_code == 403
 
 
 # ---------------------------------------------------------------------------

@@ -1,10 +1,10 @@
-"""AI-assisted Gmail draft lifecycle with idempotent send (M6.6, Req 32).
+"""AI-assisted Gmail draft lifecycle with duplicate-send guards (M6.6, Req 32).
 
 :class:`EmailDraftService` owns the full lifecycle of an AI-assisted Gmail
 draft: assembling permission-filtered confirmed context, calling the provider's
 ``generate_email_draft``, persisting the suggested draft, editing/approving/
 rejecting it, materializing a real Gmail draft, and — only after a *separate*
-explicit confirmation — sending it exactly once.
+explicit confirmation — initiating one local send attempt.
 
 Design invariants (carried from the Core Engine / CWI services):
 
@@ -19,13 +19,14 @@ Design invariants (carried from the Core Engine / CWI services):
   require the connection to carry the incrementally-granted ``gmail.compose``
   scope; otherwise the service refuses with ``403`` and directs the user to the
   incremental-authorization flow (Requirement 32.3).
-* **Send is a separate explicit confirmation and is idempotent.** Sending
+* **Send is a separate explicit confirmation with duplicate-send guards.** Sending
   requires ``confirm=True`` (distinct from approving content, Requirement 32.7)
   and performs a single-row atomic status compare-and-set into ``SENDING``
   guarded by ``send_idempotency_key``. Any attempt that observes ``SENDING`` or
   ``SENT`` returns the existing ``gmail_sent_message_id`` **without** calling
-  Gmail again, so a retried/concurrent send never produces a duplicate
-  (Requirement 32.8 / Property 17). Email is never sent automatically.
+  Gmail again. If the Gmail transport outcome is ambiguous, the draft becomes
+  terminal ``FAILED`` and the user is told to check Gmail Sent rather than
+  blindly retrying. Email is never sent automatically.
 * **Org + user scoping.** Every lookup is org-scoped; a cross-org draft id is
   indistinguishable from a missing one and yields ``404`` (Requirement 32.12 /
   Property 13).
@@ -72,10 +73,12 @@ from app.core.services.ai_provider import (
 from app.core.services.audit_service import AuditService
 from app.dependencies import call_with_fallback, not_found, scope_select
 from app.modules.cwi.models import (
+    ConnectionStatus,
     EmailDraft,
     EmailDraftStatus,
     EmailMessageRecord,
     IntegrationConnection,
+    IntegrationProvider,
     IntegrationService as IntegrationServiceEnum,
 )
 from app.modules.cwi.schemas import EmailDraftEdit, EmailDraftRequest
@@ -84,7 +87,10 @@ from app.modules.cwi.services.gmail_client import (
     GmailClientError,
     GmailDraftMessage,
 )
-from app.modules.cwi.services.google_oauth import GMAIL_COMPOSE_SCOPE
+from app.modules.cwi.services.google_oauth import (
+    GMAIL_COMPOSE_SCOPE,
+    GoogleOAuthError,
+)
 from app.modules.cwi.services.integration_service import IntegrationService
 
 # Audit action types recorded per external effect (Requirement 32.9 / P20).
@@ -110,6 +116,14 @@ _SENDABLE_STATUSES = (
     EmailDraftStatus.USER_APPROVED,
     EmailDraftStatus.GMAIL_DRAFT_CREATED,
 )
+
+
+class EmailDraftSendError(RuntimeError):
+    """A send failure whose safe persisted state should still commit."""
+
+
+class EmailDraftCreateError(RuntimeError):
+    """An ambiguous Gmail-draft creation whose terminal state must commit."""
 
 
 def _conflict(detail: str) -> HTTPException:
@@ -219,11 +233,14 @@ class EmailDraftService:
 
     # -- Scoped lookups -----------------------------------------------------
 
-    def _get_scoped(self, org_id: UUID, draft_id: UUID) -> EmailDraft:
-        """Return an org-scoped draft or ``404`` (Requirement 32.12 / P13)."""
+    def _get_scoped(
+        self, org_id: UUID, user_id: UUID, draft_id: UUID
+    ) -> EmailDraft:
+        """Return an org-and-user-scoped draft or ``404``."""
 
         stmt = scope_select(select(EmailDraft), EmailDraft, org_id).where(
-            EmailDraft.id == draft_id
+            EmailDraft.id == draft_id,
+            EmailDraft.user_id == user_id,
         )
         draft = self.db.execute(stmt).scalar_one_or_none()
         if draft is None:
@@ -241,9 +258,19 @@ class EmailDraftService:
         connection = self.db.execute(stmt).scalar_one_or_none()
         if connection is None:
             raise not_found("Integration connection not found.")
+        if (
+            connection.provider != IntegrationProvider.GOOGLE
+            or connection.service != IntegrationServiceEnum.GMAIL
+            or connection.status != ConnectionStatus.CONNECTED
+        ):
+            raise _forbidden(
+                "A connected Gmail account is required. Reconnect Gmail and try again."
+            )
         return connection
 
-    def _access_token(self, org_id: UUID, connection_id: UUID) -> str:
+    def _access_token(
+        self, org_id: UUID, user_id: UUID, connection_id: UUID
+    ) -> str:
         """Obtain a valid (refreshed) access token, or a transient empty one.
 
         The token exists only transiently in memory for the outbound Gmail call
@@ -253,7 +280,11 @@ class EmailDraftService:
 
         if self._integration_service is not None:
             return self._integration_service.get_valid_access_token(
-                org_id, connection_id
+                org_id,
+                user_id,
+                connection_id,
+                expected_service=IntegrationServiceEnum.GMAIL,
+                required_scopes=(GMAIL_COMPOSE_SCOPE,),
             )
         return ""
 
@@ -276,7 +307,7 @@ class EmailDraftService:
     # -- Context assembly ---------------------------------------------------
 
     def _thread_messages(
-        self, org_id: UUID, source_item_id: UUID | None
+        self, org_id: UUID, user_id: UUID, source_item_id: UUID | None
     ) -> tuple[list[GmailMessageView], str | None]:
         """Build the Gmail thread view + thread id for a source item (bounded).
 
@@ -291,7 +322,16 @@ class EmailDraftService:
 
         stmt = (
             scope_select(select(EmailMessageRecord), EmailMessageRecord, org_id)
+            .join(
+                IntegrationConnection,
+                IntegrationConnection.id
+                == EmailMessageRecord.integration_connection_id,
+            )
             .where(EmailMessageRecord.source_item_id == source_item_id)
+            .where(
+                IntegrationConnection.organization_id == org_id,
+                IntegrationConnection.user_id == user_id,
+            )
             .order_by(
                 EmailMessageRecord.received_at.asc(),
                 EmailMessageRecord.id.asc(),
@@ -482,7 +522,7 @@ class EmailDraftService:
             raise _conflict("A Gmail connection is required to draft email.")
 
         thread_messages, thread_id = self._thread_messages(
-            org_id, req.source_item_id
+            org_id, user_id, req.source_item_id
         )
         knowledge, memories = self._confirmed_knowledge(
             org_id, req.business_entity_id
@@ -543,7 +583,7 @@ class EmailDraftService:
         terminal or in-flight send state.
         """
 
-        draft = self._get_scoped(org_id, draft_id)
+        draft = self._get_scoped(org_id, user_id, draft_id)
         if draft.status in (
             EmailDraftStatus.SENDING,
             EmailDraftStatus.SENT,
@@ -584,7 +624,7 @@ class EmailDraftService:
         from the separate explicit send confirmation (Requirement 32.7).
         """
 
-        draft = self._get_scoped(org_id, draft_id)
+        draft = self._get_scoped(org_id, user_id, draft_id)
         if draft.status in (
             EmailDraftStatus.USER_APPROVED,
             EmailDraftStatus.GMAIL_DRAFT_CREATED,
@@ -608,7 +648,7 @@ class EmailDraftService:
         draft is in-flight or already sent.
         """
 
-        draft = self._get_scoped(org_id, draft_id)
+        draft = self._get_scoped(org_id, user_id, draft_id)
         if draft.status == EmailDraftStatus.REJECTED:
             return draft
         if draft.status in (EmailDraftStatus.SENDING, EmailDraftStatus.SENT):
@@ -628,11 +668,13 @@ class EmailDraftService:
         Requires an approved draft and the incremental ``gmail.compose`` scope.
         Calls ``users.drafts.create``, stores ``gmail_draft_id``, and writes
         exactly one ``CREATE_GMAIL_DRAFT`` audit row in the same transaction
-        (Requirement 32.9). Idempotent: an already-created Gmail draft is
-        returned without a second create.
+        (Requirement 32.9). An already-confirmed local Gmail draft is returned
+        without another create. Because Gmail's create API provides no
+        idempotency guarantee, an ambiguous transport failure is terminal
+        locally and instructs the user to check Gmail Drafts before proceeding.
         """
 
-        draft = self._get_scoped(org_id, draft_id)
+        draft = self._get_scoped(org_id, user_id, draft_id)
         if (
             draft.status == EmailDraftStatus.GMAIL_DRAFT_CREATED
             and draft.gmail_draft_id is not None
@@ -648,7 +690,7 @@ class EmailDraftService:
         )
         self._require_compose_scope(connection)
 
-        token = self._access_token(org_id, connection.id)
+        token = self._access_token(org_id, user_id, connection.id)
         message = self._to_gmail_message(draft)
         try:
             gmail_draft_id = self.gmail.create_draft(
@@ -657,10 +699,18 @@ class EmailDraftService:
                 idempotency_key=f"draft-{draft.send_idempotency_key}",
             )
         except GmailClientError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Could not create the Gmail draft: {exc}",
-            ) from exc
+            warning = (
+                "Gmail draft creation could not be confirmed. "
+                "Check Gmail Drafts before creating another draft."
+            )
+            draft.status = EmailDraftStatus.FAILED
+            current_warnings = list(draft.warnings_json or [])
+            if warning not in current_warnings:
+                current_warnings.append(warning)
+            draft.warnings_json = current_warnings
+            self.db.add(draft)
+            self.db.flush()
+            raise EmailDraftCreateError(warning) from exc
 
         draft.gmail_draft_id = gmail_draft_id
         draft.status = EmailDraftStatus.GMAIL_DRAFT_CREATED
@@ -695,7 +745,7 @@ class EmailDraftService:
             org_id, draft.integration_connection_id, user_id
         )
         self._require_compose_scope(connection)
-        token = self._access_token(org_id, connection.id)
+        token = self._access_token(org_id, user_id, connection.id)
         try:
             self.gmail.update_draft(
                 access_token=token,
@@ -717,13 +767,17 @@ class EmailDraftService:
         *,
         confirm: bool,
     ) -> EmailDraft:
-        """Send the draft exactly once after a separate explicit confirm (32.7/8).
+        """Send the draft after a separate explicit confirmation (32.7/8).
 
         ``confirm`` must be ``True`` (the separate confirmation distinct from
-        approving content). The send is idempotent: a single-row atomic
+        approving content). A single-row atomic
         compare-and-set moves the draft into ``SENDING`` before any Gmail call;
         any attempt that observes ``SENDING``/``SENT`` returns the existing
-        ``gmail_sent_message_id`` without sending again (Property 17). On the
+        ``gmail_sent_message_id`` without sending again. If authorization fails
+        before the Gmail call, the prior sendable status is restored so the user
+        can reconnect and retry. If the Gmail call itself fails, its external
+        outcome may be ambiguous, so the draft becomes terminal ``FAILED`` and
+        cannot be blindly retried. On the
         winning send the draft becomes ``SENT`` with its
         ``gmail_sent_message_id`` set and exactly one ``SEND_EMAIL`` audit row is
         written in the same transaction (Requirement 32.9). Email is never sent
@@ -735,10 +789,10 @@ class EmailDraftService:
                 "Sending requires a separate explicit confirmation (confirm=true)."
             )
 
-        draft = self._get_scoped(org_id, draft_id)
+        draft = self._get_scoped(org_id, user_id, draft_id)
 
         # Any attempt observing an in-flight or completed send returns the
-        # existing sent message id WITHOUT calling Gmail again (Property 17).
+        # current local state WITHOUT calling Gmail again.
         if draft.status in (EmailDraftStatus.SENDING, EmailDraftStatus.SENT):
             return draft
         if draft.status not in _SENDABLE_STATUSES:
@@ -750,6 +804,7 @@ class EmailDraftService:
             org_id, draft.integration_connection_id, user_id
         )
         self._require_compose_scope(connection)
+        prior_status = draft.status
 
         # Atomic status compare-and-set into SENDING: only one caller can win
         # the transition out of USER_APPROVED/GMAIL_DRAFT_CREATED (Req 32.8).
@@ -758,6 +813,7 @@ class EmailDraftService:
             .where(
                 EmailDraft.id == draft.id,
                 EmailDraft.organization_id == org_id,
+                EmailDraft.user_id == user_id,
                 EmailDraft.status.in_(_SENDABLE_STATUSES),
             )
             .values(status=EmailDraftStatus.SENDING)
@@ -771,23 +827,41 @@ class EmailDraftService:
 
         self.db.refresh(draft)  # draft.status is now SENDING
 
-        token = self._access_token(org_id, connection.id)
-        message = self._to_gmail_message(draft)
         try:
+            token = self._access_token(org_id, user_id, connection.id)
+            message = self._to_gmail_message(draft)
             sent_message_id = self.gmail.send_draft(
                 access_token=token,
                 message=message,
                 idempotency_key=draft.send_idempotency_key,
                 draft_id=draft.gmail_draft_id,
             )
-        except GmailClientError as exc:
-            draft.status = EmailDraftStatus.FAILED
+        except GoogleOAuthError as exc:
+            # Token acquisition failed before Gmail was called, so no external
+            # send can have happened. Restore the exact prior sendable state and
+            # allow a deliberate retry after reconnecting the integration.
+            draft.status = prior_status
             self.db.add(draft)
             self.db.flush()
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Could not send the email: {exc}",
+            raise EmailDraftSendError(
+                "Gmail authorization expired. Please reconnect Gmail and retry."
             ) from exc
+        except GmailClientError as exc:
+            # The request may have reached Gmail even though the client received
+            # an error (for example, a lost response). Treat this as terminal
+            # locally and require reconciliation before another message is made.
+            warning = (
+                "The send outcome could not be confirmed. "
+                "Check Gmail Sent before creating another message."
+            )
+            draft.status = EmailDraftStatus.FAILED
+            current_warnings = list(draft.warnings_json or [])
+            if warning not in current_warnings:
+                current_warnings.append(warning)
+            draft.warnings_json = current_warnings
+            self.db.add(draft)
+            self.db.flush()
+            raise EmailDraftSendError(warning) from exc
 
         draft.status = EmailDraftStatus.SENT
         draft.gmail_sent_message_id = sent_message_id
@@ -820,10 +894,12 @@ class EmailDraftService:
         )
         return list(self.db.execute(stmt).scalars().all())
 
-    def get_draft(self, org_id: UUID, draft_id: UUID) -> EmailDraft:
-        """Return a single org-scoped draft or ``404`` (Requirement 32.12)."""
+    def get_draft(
+        self, org_id: UUID, user_id: UUID, draft_id: UUID
+    ) -> EmailDraft:
+        """Return a single org-and-user-scoped draft or ``404``."""
 
-        return self._get_scoped(org_id, draft_id)
+        return self._get_scoped(org_id, user_id, draft_id)
 
     # -- Delete -------------------------------------------------------------
 
@@ -847,7 +923,7 @@ class EmailDraftService:
             HTTPException: ``404`` if the draft does not exist for the org.
         """
 
-        draft = self._get_scoped(org_id, draft_id)
+        draft = self._get_scoped(org_id, user_id, draft_id)
         deleted_id = draft.id
         self.db.delete(draft)
         self.db.flush()
@@ -881,6 +957,8 @@ class EmailDraftService:
 
 __all__ = [
     "EmailDraftService",
+    "EmailDraftCreateError",
+    "EmailDraftSendError",
     "DELETE_EMAIL_DRAFT",
     "CREATE_GMAIL_DRAFT",
     "SEND_EMAIL",

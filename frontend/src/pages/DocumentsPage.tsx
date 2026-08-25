@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ApiError, documentsApi } from "@/api";
+import { ApiError, documentsApi, getErrorMessage } from "@/api";
 import type { DocumentAsset, DocumentProcessingStatus, Sensitivity } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/feedback";
 
@@ -43,7 +43,9 @@ function formatDateTime(iso: string | null): string {
 function describeError(err: unknown, verb: string): string {
   if (err instanceof ApiError) {
     if (err.status === 404) return "That document no longer exists. Refreshed.";
-    if (err.status === 422) return "That document could not be processed.";
+    if ([400, 413, 415, 422].includes(err.status)) {
+      return getErrorMessage(err, `Could not ${verb}.`);
+    }
     return `Could not ${verb} (${err.status}). Please retry.`;
   }
   return `Could not ${verb}. Please retry.`;
@@ -70,8 +72,8 @@ function UploadForm({ disabled, onUpload }: UploadFormProps) {
     <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
       <h2 className="text-sm font-semibold text-slate-900">Upload a document</h2>
       <p className="mt-1 text-xs text-slate-500">
-        PDF, DOCX, TXT, and common email attachments are supported. The file is
-        stored securely; only permitted, relevant content is ever retrieved.
+        PDF, DOCX, TXT, Markdown, CSV, and EML files up to 20 MB are supported.
+        Only your own uploaded documents can be retrieved.
       </p>
 
       <div className="mt-4 space-y-4">
@@ -86,6 +88,7 @@ function UploadForm({ disabled, onUpload }: UploadFormProps) {
             id="document-file"
             ref={inputRef}
             type="file"
+            accept=".pdf,.docx,.txt,.md,.markdown,.csv,.eml"
             onChange={(event) => setFile(event.target.files?.[0] ?? null)}
             className="mt-1 block w-full text-sm text-slate-700 file:mr-3 file:rounded-md file:border-0 file:bg-brand-50 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-brand-700 hover:file:bg-brand-100"
           />
@@ -139,19 +142,26 @@ export default function DocumentsPage() {
     useState<DocumentAsset | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const listRequestGeneration = useRef(0);
+  const detailRequestGeneration = useRef(0);
 
   const loadOpenedDocument = useCallback(async () => {
+    const requestGeneration = ++detailRequestGeneration.current;
     if (!documentId) {
       setOpenedDocument(null);
       setDetailError(null);
+      setDetailLoading(false);
       return;
     }
 
     setDetailLoading(true);
     setDetailError(null);
     try {
-      setOpenedDocument(await documentsApi.get(documentId));
+      const result = await documentsApi.get(documentId);
+      if (requestGeneration !== detailRequestGeneration.current) return;
+      setOpenedDocument(result);
     } catch (err) {
+      if (requestGeneration !== detailRequestGeneration.current) return;
       setOpenedDocument(null);
       setDetailError(
         err instanceof ApiError && err.status === 404
@@ -159,28 +169,42 @@ export default function DocumentsPage() {
           : "Could not load the opened document. Please retry.",
       );
     } finally {
-      setDetailLoading(false);
+      if (requestGeneration === detailRequestGeneration.current) {
+        setDetailLoading(false);
+      }
     }
   }, [documentId]);
 
   useEffect(() => {
     void loadOpenedDocument();
+    return () => {
+      detailRequestGeneration.current += 1;
+    };
   }, [loadOpenedDocument]);
 
   const load = useCallback(async () => {
+    const requestGeneration = ++listRequestGeneration.current;
     setLoading(true);
     setError(null);
     try {
-      setDocuments(await documentsApi.list());
+      const result = await documentsApi.list();
+      if (requestGeneration !== listRequestGeneration.current) return;
+      setDocuments(result);
     } catch {
+      if (requestGeneration !== listRequestGeneration.current) return;
       setError("Could not load your documents. Please retry.");
     } finally {
-      setLoading(false);
+      if (requestGeneration === listRequestGeneration.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     void load();
+    return () => {
+      listRequestGeneration.current += 1;
+    };
   }, [load]);
 
   const handleUpload = useCallback(
@@ -217,12 +241,34 @@ export default function DocumentsPage() {
           await loadOpenedDocument();
         }
       } catch (err) {
+        await Promise.allSettled([
+          load(),
+          documentId ? loadOpenedDocument() : Promise.resolve(),
+        ]);
         setActionError(describeError(err, verb));
       } finally {
         setBusy(false);
       }
     },
     [documentId, load, loadOpenedDocument, navigate],
+  );
+
+  const handleDelete = useCallback(
+    (document: DocumentAsset) => {
+      if (
+        !window.confirm(
+          `Permanently delete “${document.filename}”? This removes the file, its extracted chunks, and embeddings. This cannot be undone.`,
+        )
+      ) {
+        return;
+      }
+      void runAction(
+        () => documentsApi.remove(document.id),
+        "delete the document",
+        document.id,
+      );
+    },
+    [runAction],
   );
 
   if (loading) {
@@ -282,8 +328,15 @@ export default function DocumentsPage() {
                   {openedDocument.processing_status}
                 </span>
               </div>
+              {openedDocument.failure_reason ? (
+                <p className="mt-3 rounded-md bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  {openedDocument.failure_reason}
+                </p>
+              ) : null}
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                {openedDocument.processing_status !== "INDEXED" ? (
+                {["UPLOADED", "FAILED"].includes(
+                  openedDocument.processing_status,
+                ) ? (
                   <button
                     type="button"
                     onClick={() =>
@@ -299,20 +352,18 @@ export default function DocumentsPage() {
                       ? "Retry processing"
                       : "Process"}
                   </button>
-                ) : (
+                ) : openedDocument.processing_status === "INDEXED" ? (
                   <span className="text-xs text-emerald-600">
                     Indexed and ready for retrieval.
+                  </span>
+                ) : (
+                  <span className="text-xs text-amber-700">
+                    Processing is in progress.
                   </span>
                 )}
                 <button
                   type="button"
-                  onClick={() =>
-                    void runAction(
-                      () => documentsApi.remove(openedDocument.id),
-                      "delete the document",
-                      openedDocument.id,
-                    )
-                  }
+                  onClick={() => handleDelete(openedDocument)}
                   disabled={busy}
                   className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-60"
                 >
@@ -373,8 +424,16 @@ export default function DocumentsPage() {
                       </div>
                     </div>
 
+                    {doc.failure_reason ? (
+                      <p className="mt-3 rounded-md bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                        {doc.failure_reason}
+                      </p>
+                    ) : null}
+
                     <div className="mt-3 flex flex-wrap items-center gap-2">
-                      {doc.processing_status !== "INDEXED" ? (
+                      {["UPLOADED", "FAILED"].includes(
+                        doc.processing_status,
+                      ) ? (
                         <button
                           type="button"
                           onClick={() =>
@@ -390,20 +449,18 @@ export default function DocumentsPage() {
                             ? "Retry processing"
                             : "Process"}
                         </button>
-                      ) : (
+                      ) : doc.processing_status === "INDEXED" ? (
                         <span className="text-xs text-emerald-600">
                           Indexed and ready for retrieval.
+                        </span>
+                      ) : (
+                        <span className="text-xs text-amber-700">
+                          Processing is in progress.
                         </span>
                       )}
                       <button
                         type="button"
-                        onClick={() =>
-                          void runAction(
-                            () => documentsApi.remove(doc.id),
-                            "delete the document",
-                            doc.id,
-                          )
-                        }
+                        onClick={() => handleDelete(doc)}
                         disabled={busy}
                         className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-60"
                       >

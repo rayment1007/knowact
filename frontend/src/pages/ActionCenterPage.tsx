@@ -16,7 +16,7 @@
 // (src/api/actions.ts, src/api/businessEntities.ts); there is no hardcoded
 // output.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ApiError,
@@ -402,6 +402,8 @@ export default function ActionCenterPage() {
     useState<CalendarEventLink | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const detailRequestGeneration = useRef(0);
+  const listRequestGeneration = useRef(0);
 
   const [statusFilter, setStatusFilter] = useState<ActionStatus | "">("");
   const [entityFilter, setEntityFilter] = useState<string>("");
@@ -415,10 +417,12 @@ export default function ActionCenterPage() {
   );
 
   const loadOpenedDetail = useCallback(async () => {
+    const requestGeneration = ++detailRequestGeneration.current;
     if (!actionId && !calendarLinkId) {
       setOpenedAction(null);
       setOpenedCalendarLink(null);
       setDetailError(null);
+      setDetailLoading(false);
       return;
     }
 
@@ -428,31 +432,43 @@ export default function ActionCenterPage() {
     setOpenedCalendarLink(null);
     try {
       if (actionId) {
-        setOpenedAction(await actionsApi.get(actionId));
+        const action = await actionsApi.get(actionId);
+        if (requestGeneration !== detailRequestGeneration.current) return;
+        setOpenedAction(action);
       } else if (calendarLinkId) {
         const link = await calendarApi.getLink(calendarLinkId);
+        if (requestGeneration !== detailRequestGeneration.current) return;
         setOpenedCalendarLink(link);
         if (link.action_item_id) {
           try {
-            setOpenedAction(await actionsApi.get(link.action_item_id));
+            const action = await actionsApi.get(link.action_item_id);
+            if (requestGeneration !== detailRequestGeneration.current) return;
+            setOpenedAction(action);
           } catch (err) {
+            if (requestGeneration !== detailRequestGeneration.current) return;
             if (!(err instanceof ApiError && err.status === 404)) throw err;
           }
         }
       }
     } catch (err) {
+      if (requestGeneration !== detailRequestGeneration.current) return;
       setDetailError(
         err instanceof ApiError && err.status === 404
           ? "This action or calendar link could not be found."
           : "Could not load the opened item. Please retry.",
       );
     } finally {
-      setDetailLoading(false);
+      if (requestGeneration === detailRequestGeneration.current) {
+        setDetailLoading(false);
+      }
     }
   }, [actionId, calendarLinkId]);
 
   useEffect(() => {
     void loadOpenedDetail();
+    return () => {
+      detailRequestGeneration.current += 1;
+    };
   }, [loadOpenedDetail]);
 
   // Business entities power the filter dropdown and the manual form; a load
@@ -513,20 +529,28 @@ export default function ActionCenterPage() {
   }, [entities]);
 
   const loadActions = useCallback(async () => {
+    const requestGeneration = ++listRequestGeneration.current;
     setLoading(true);
     setError(null);
     try {
       const result = await actionsApi.list(filters);
+      if (requestGeneration !== listRequestGeneration.current) return;
       setActions(result);
     } catch {
+      if (requestGeneration !== listRequestGeneration.current) return;
       setError("Could not load actions. Please retry.");
     } finally {
-      setLoading(false);
+      if (requestGeneration === listRequestGeneration.current) {
+        setLoading(false);
+      }
     }
   }, [filters]);
 
   useEffect(() => {
     void loadActions();
+    return () => {
+      listRequestGeneration.current += 1;
+    };
   }, [loadActions]);
 
   const handleMarkDone = useCallback(
@@ -616,7 +640,7 @@ export default function ActionCenterPage() {
           </div>
 
           {detailLoading ? (
-            <LoadingState label="Loading opened itemâ€¦" />
+            <LoadingState label="Loading opened item…" />
           ) : detailError ? (
             <ErrorState
               message={detailError}

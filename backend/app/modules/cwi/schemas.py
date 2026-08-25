@@ -341,6 +341,7 @@ class DocumentAssetView(BaseModel):
     mime_type: str
     checksum: str
     processing_status: DocumentProcessingStatus
+    failure_reason: str | None
     sensitivity: Sensitivity
     source_deleted: bool
     created_at: datetime

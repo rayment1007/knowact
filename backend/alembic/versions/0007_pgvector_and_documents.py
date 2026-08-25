@@ -77,11 +77,6 @@ sensitivity = postgresql.ENUM(
     create_type=False,
 )
 
-# ivfflat fallback list count when hnsw is unavailable. 100 is a sensible
-# default for small/medium corpora (documented per design guidance).
-_IVFFLAT_LISTS = 100
-
-
 def _embedding_dimension() -> int:
     """Pin the deployed embedding dimension from application settings."""
 
@@ -201,21 +196,15 @@ def upgrade() -> None:
         ["organization_id", "document_asset_id"],
     )
 
-    # Approximate-NN index on the embedding — PostgreSQL/pgvector only. Prefer
-    # hnsw (better recall/latency, no training); fall back to ivfflat with a
-    # documented ``lists`` value if hnsw is unavailable on the server build.
+    # Approximate-NN index on the embedding — PostgreSQL/pgvector only. HNSW is
+    # an explicit deployment requirement. Do not catch DDL errors and try a
+    # fallback in the same transaction: PostgreSQL marks the transaction as
+    # aborted after the first error, so that fallback could never succeed.
     if is_postgres:
-        try:
-            op.execute(
-                "CREATE INDEX ix_document_chunks_embedding_hnsw "
-                "ON document_chunks USING hnsw (embedding vector_cosine_ops)"
-            )
-        except Exception:  # pragma: no cover - depends on server build
-            op.execute(
-                "CREATE INDEX ix_document_chunks_embedding_ivfflat "
-                "ON document_chunks USING ivfflat (embedding vector_cosine_ops) "
-                f"WITH (lists = {_IVFFLAT_LISTS})"
-            )
+        op.execute(
+            "CREATE INDEX ix_document_chunks_embedding_hnsw "
+            "ON document_chunks USING hnsw (embedding vector_cosine_ops)"
+        )
 
 
 def downgrade() -> None:

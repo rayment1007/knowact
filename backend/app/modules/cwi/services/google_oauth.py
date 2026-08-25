@@ -80,6 +80,7 @@ class GoogleIdentity:
     external_account_id: str  # the OIDC ``sub``
     email: str
     full_name: str
+    email_verified: bool
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,7 @@ class FakeGoogleOAuthClient:
             external_account_id=f"google-sub-{code}",
             email=f"{code}@example.com",
             full_name=f"User {code}",
+            email_verified=True,
         )
 
     # -- Incremental service authorization ----------------------------------
@@ -231,7 +233,7 @@ class FakeGoogleOAuthClient:
             access_token=f"access-{code}",
             refresh_token=f"refresh-{code}",
             expires_at=now + timedelta(seconds=self._ttl),
-            granted_scopes=[GMAIL_READONLY_SCOPE],
+            granted_scopes=[GMAIL_READONLY_SCOPE, GMAIL_COMPOSE_SCOPE],
             external_account_id=f"google-sub-{code}",
             account_email=f"{code}@example.com",
         )
@@ -333,10 +335,15 @@ class HttpGoogleOAuthClient:
                 token_resp.raise_for_status()
                 access_token = token_resp.json()["access_token"]
                 userinfo = self._fetch_userinfo(http, access_token)
+                if userinfo.get("email_verified") is not True:
+                    raise GoogleOAuthError(
+                        "Google sign-in email address is not verified."
+                    )
                 return GoogleIdentity(
                     external_account_id=str(userinfo["sub"]),
                     email=str(userinfo["email"]),
                     full_name=str(userinfo.get("name", "")),
+                    email_verified=True,
                 )
         except (httpx.HTTPError, KeyError, ValueError) as exc:
             raise GoogleOAuthError(
@@ -377,6 +384,10 @@ class HttpGoogleOAuthClient:
                 payload = token_resp.json()
                 access_token = payload["access_token"]
                 userinfo = self._fetch_userinfo(http, access_token)
+                if userinfo.get("email_verified") is not True:
+                    raise GoogleOAuthError(
+                        "Google account email address is not verified."
+                    )
                 return GoogleTokenGrant(
                     access_token=access_token,
                     refresh_token=payload.get("refresh_token"),

@@ -166,10 +166,14 @@ def answer_provenance(
 ) -> AnswerProvenanceView:
     """Return the exact citations/evidence that grounded an AI answer (33.7).
 
-    Org-scoped: a cross-org/missing answer id yields ``404``.
+    User-scoped: another user's, cross-org, or missing answer id yields ``404``.
     """
 
-    log = service.answer_provenance(user.organization_id, answer_id)
+    log = service.answer_provenance(
+        user.organization_id,
+        user.id,
+        answer_id,
+    )
     return AnswerProvenanceView(
         answer_id=log.id,
         question=log.question,

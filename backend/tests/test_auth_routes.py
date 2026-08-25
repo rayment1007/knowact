@@ -23,7 +23,8 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from app.config import get_settings
+from app.config import Settings, get_settings
+from app.core.routers import auth as auth_router
 
 COOKIE_NAME = get_settings().auth_cookie_name
 
@@ -72,6 +73,29 @@ def test_login_unknown_email_returns_401_no_cookie(client: TestClient) -> None:
     assert COOKIE_NAME not in resp.cookies
 
 
+def test_unknown_email_still_runs_password_verification(
+    client: TestClient, monkeypatch
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def _verify(password: str, password_hash: str) -> bool:
+        calls.append((password, password_hash))
+        return False
+
+    monkeypatch.setattr(auth_router, "verify_password", _verify)
+    response = _login(client, "nobody@example.com", "whatever")
+    assert response.status_code == 401
+    assert len(calls) == 1
+    assert calls[0][1] == auth_router._DUMMY_PASSWORD_HASH
+
+
+def test_login_rejects_password_longer_than_bcrypt_limit(
+    client: TestClient,
+) -> None:
+    response = _login(client, "nobody@example.com", "é" * 40)
+    assert response.status_code == 422
+
+
 def test_login_response_never_exposes_password_hash(
     client: TestClient, seeded_user: dict[str, Any]
 ) -> None:
@@ -81,6 +105,30 @@ def test_login_response_never_exposes_password_hash(
     # Neither the user projection nor the raw body should carry the hash.
     assert "password_hash" not in resp.json()["user"]
     assert "password_hash" not in resp.text
+
+
+def test_login_allowlist_normalizes_case_and_whitespace(
+    client: TestClient, seeded_user: dict[str, Any]
+) -> None:
+    settings = Settings(auth_allowed_emails=["  TESTER@EXAMPLE.COM  "])
+    client.app.dependency_overrides[get_settings] = lambda: settings
+
+    response = _login(client, "  TESTER@EXAMPLE.COM  ", seeded_user["password"])
+
+    assert response.status_code == 200
+    assert get_settings().auth_cookie_name in response.cookies
+
+
+def test_login_rejects_valid_password_for_unlisted_account(
+    client: TestClient, seeded_user: dict[str, Any]
+) -> None:
+    settings = Settings(auth_allowed_emails=["owner@example.com"])
+    client.app.dependency_overrides[get_settings] = lambda: settings
+
+    response = _login(client, seeded_user["email"], seeded_user["password"])
+
+    assert response.status_code == 401
+    assert get_settings().auth_cookie_name not in response.cookies
 
 
 # ---------------------------------------------------------------------------

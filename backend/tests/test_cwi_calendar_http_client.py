@@ -126,6 +126,8 @@ def test_create_timed_event_with_reminders() -> None:
     assert event_id == "evt-1"
     body = captured["body"]
     assert body["summary"] == "Meeting"
+    assert body["id"]
+    assert set(body["id"]) <= set("0123456789abcdefghijklmnopqrstuv")
     assert body["description"] == "Sync"
     assert body["start"]["dateTime"] == start.isoformat()
     assert body["end"]["dateTime"] == end.isoformat()
@@ -197,6 +199,28 @@ def test_create_event_http_error_raises_secret_free_error() -> None:
             idempotency_key="k",
         )
     assert _ACCESS_TOKEN not in str(exc_info.value)
+
+
+def test_create_event_reconciles_duplicate_idempotency_key() -> None:
+    captured_ids: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            event_id = json.loads(request.content)["id"]
+            captured_ids.append(event_id)
+            return httpx.Response(409, json={"error": "duplicate"})
+        assert request.method == "GET"
+        assert request.url.path.endswith(f"/events/{captured_ids[0]}")
+        return httpx.Response(200, json={"id": captured_ids[0]})
+
+    client = _client(handler)
+    event_id = client.create_event(
+        access_token=_ACCESS_TOKEN,
+        calendar_id="primary",
+        event=CalendarEventInput(summary="Retry-safe event"),
+        idempotency_key="stable-operation-key",
+    )
+    assert event_id == captured_ids[0]
 
 
 # ---------------------------------------------------------------------------

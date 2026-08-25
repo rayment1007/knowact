@@ -107,6 +107,10 @@ code but **not** `.env`, so restart uvicorn after changing environment values.
 `SEED_USER_PASSWORD` has no default. The seeder refuses to run until you set it,
 which is what keeps a shared password out of this repository. The seed creates
 `alex@knowact.app` (ADMIN) and `sarah@knowact.app` (MEMBER) with that password.
+For a deployed phase-one instance, set `AUTH_ALLOWED_EMAILS` to a JSON array
+containing exactly one owner address. That same exact allowlist protects both
+password login and Google Sign-In; an unlisted Google identity is rejected
+before any user or organization is created.
 
 Full first-time setup, including Google Cloud and OpenAI configuration, is in
 [`SETUP_NEW_MACHINE.txt`](SETUP_NEW_MACHINE.txt). Deployment to Neon, Render, and
@@ -152,9 +156,10 @@ no committed key, token, or password anywhere in the tree.
 
 A few things worth knowing if you deploy your own copy:
 
-- **There is no public sign-up.** Accounts exist only because the seeder created
-  them, and the seeder refuses to run without SEED_USER_PASSWORD. Nobody can
-  register themselves against a running instance.
+- **There is no public sign-up.** A production instance refuses to start unless
+  `AUTH_ALLOWED_EMAILS` contains exactly one owner address. Both password login
+  and Google Sign-In enforce it, and an unlisted Google account cannot create a
+  user or workspace.
 - **The auth token is an HTTP-only cookie.** Client JavaScript never reads it, so
   an XSS bug cannot exfiltrate a session. Set `AUTH_COOKIE_SECURE=true` in any
   deployed environment.

@@ -20,6 +20,10 @@ from fastapi.testclient import TestClient
 from app.config import Settings, get_settings
 from app.core import models as core_models
 from app.modules.cwi.dependencies import gmail_client, google_oauth_client
+from app.modules.cwi.models import (
+    IntegrationConnection,
+    IntegrationService as IntegrationServiceEnum,
+)
 from app.modules.cwi.services.gmail_client import FakeGmailClient, GmailMessage
 from app.modules.cwi.services.google_oauth import FakeGoogleOAuthClient
 
@@ -103,6 +107,62 @@ def _connect_gmail(client: TestClient) -> str:
     assert callback.status_code == 302
     listed = client.get("/api/integrations").json()
     return listed[0]["id"]
+
+
+def test_disconnected_connection_cannot_sync_or_call_gmail(
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+    fake_gmail: FakeGmailClient,
+) -> None:
+    _login(cwi_client, seeded_user)
+    connection_id = _connect_gmail(cwi_client)
+    assert cwi_client.post(
+        f"/api/integrations/{connection_id}/disconnect"
+    ).status_code == 200
+    calls_before = fake_gmail.list_calls
+
+    response = cwi_client.post(f"/api/gmail/{connection_id}/sync-now")
+
+    assert response.status_code == 403
+    assert fake_gmail.list_calls == calls_before
+
+
+def test_gmail_sync_rejects_connection_missing_read_scope_before_external_call(
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+    fake_gmail: FakeGmailClient,
+    db_session: Any,
+) -> None:
+    _login(cwi_client, seeded_user)
+    connection_id = _connect_gmail(cwi_client)
+    connection = db_session.query(IntegrationConnection).one()
+    connection.granted_scopes_json = []
+    db_session.flush()
+    calls_before = fake_gmail.list_calls
+
+    response = cwi_client.post(f"/api/gmail/{connection_id}/sync-now")
+
+    assert response.status_code == 403
+    assert fake_gmail.list_calls == calls_before
+
+
+def test_gmail_sync_rejects_calendar_connection_before_external_call(
+    cwi_client: TestClient,
+    seeded_user: dict[str, Any],
+    fake_gmail: FakeGmailClient,
+    db_session: Any,
+) -> None:
+    _login(cwi_client, seeded_user)
+    connection_id = _connect_gmail(cwi_client)
+    connection = db_session.query(IntegrationConnection).one()
+    connection.service = IntegrationServiceEnum.GOOGLE_CALENDAR
+    db_session.flush()
+    calls_before = fake_gmail.list_calls
+
+    response = cwi_client.post(f"/api/gmail/{connection_id}/sync-now")
+
+    assert response.status_code == 403
+    assert fake_gmail.list_calls == calls_before
 
 
 # ---------------------------------------------------------------------------

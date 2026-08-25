@@ -18,8 +18,15 @@ from sqlalchemy.orm import Session
 from app.core import models as core_models
 from app.core.models import Sensitivity
 from app.modules.cwi.models import DocumentChunk, DocumentProcessingStatus
-from app.modules.cwi.services.document_parsing import chunk_text
-from app.modules.cwi.services.document_service import DocumentService
+from app.modules.cwi.services.document_parsing import (
+    DocumentParseError,
+    chunk_text,
+    parse_document,
+)
+from app.modules.cwi.services.document_service import (
+    DocumentProcessingError,
+    DocumentService,
+)
 from app.modules.cwi.services.embedding import FakeEmbeddingProvider
 from app.modules.cwi.services.retrieval_service import (
     RetrievalFilters,
@@ -42,6 +49,12 @@ class _InMemoryStorage:
 
     def delete(self, org_id, key: str) -> None:
         self._objects.pop((str(org_id), key), None)
+
+
+class _ShortEmbeddingProvider:
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        del texts
+        return []
 
 
 @pytest.fixture()
@@ -98,6 +111,84 @@ def test_process_embeds_once(
     )
     assert len(chunks) >= 1
     assert all(len(c.embedding) == _DIM for c in chunks)
+
+
+def test_text_parser_rejects_legacy_and_binary_bytes() -> None:
+    with pytest.raises(DocumentParseError):
+        parse_document(b"\x80\x81\x82", "text/plain", "bad.txt")
+    with pytest.raises(DocumentParseError):
+        parse_document(b"hello\x00world", "text/plain", "bad.txt")
+    with pytest.raises(DocumentParseError):
+        parse_document(b"hello", "application/octet-stream", "bad.txt")
+
+
+def test_process_rejects_empty_text_and_incomplete_embeddings(
+    db_session: Session, org_user: dict[str, Any]
+) -> None:
+    storage = _InMemoryStorage()
+    empty_service = DocumentService(
+        db_session, storage, FakeEmbeddingProvider(dimension=_DIM)
+    )
+    empty = empty_service.upload(
+        org_user["org"].id,
+        org_user["user"].id,
+        filename="empty.txt",
+        mime_type="text/plain",
+        data=b"   \n\n",
+    )
+    with pytest.raises(DocumentProcessingError):
+        empty_service.process(
+            org_user["org"].id, org_user["user"].id, empty.id
+        )
+    assert empty.processing_status == DocumentProcessingStatus.FAILED
+    assert empty.failure_reason
+
+    short_service = DocumentService(
+        db_session, storage, _ShortEmbeddingProvider()
+    )
+    incomplete = short_service.upload(
+        org_user["org"].id,
+        org_user["user"].id,
+        filename="notes.txt",
+        mime_type="text/plain",
+        data=b"Useful text",
+    )
+    with pytest.raises(DocumentProcessingError):
+        short_service.process(
+            org_user["org"].id, org_user["user"].id, incomplete.id
+        )
+    assert incomplete.processing_status == DocumentProcessingStatus.FAILED
+    assert (
+        db_session.query(DocumentChunk)
+        .filter(DocumentChunk.document_asset_id == incomplete.id)
+        .count()
+        == 0
+    )
+
+
+def test_upload_compensates_storage_when_database_work_fails(
+    db_session: Session,
+    org_user: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _InMemoryStorage()
+    service = DocumentService(
+        db_session, storage, FakeEmbeddingProvider(dimension=_DIM)
+    )
+
+    def _fail_audit(**_kwargs: Any) -> None:
+        raise RuntimeError("simulated audit failure")
+
+    monkeypatch.setattr(service.audit, "record", _fail_audit)
+    with pytest.raises(RuntimeError, match="simulated audit failure"):
+        service.upload(
+            org_user["org"].id,
+            org_user["user"].id,
+            filename="notes.txt",
+            mime_type="text/plain",
+            data=b"Useful text",
+        )
+    assert storage._objects == {}
 
 
 def test_retrieve_ranks_relevant_chunk_and_carries_citation_fields(

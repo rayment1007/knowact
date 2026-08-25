@@ -29,6 +29,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.core.models import Sensitivity, User
@@ -42,6 +43,11 @@ from app.modules.cwi.services.document_service import (
 )
 from app.modules.cwi.services.embedding import EmbeddingProvider
 from app.modules.cwi.services.storage import StorageBackend
+from app.modules.cwi.services.upload_validation import (
+    MAX_DOCUMENT_UPLOAD_BYTES,
+    UploadValidationError,
+    validate_document_upload,
+)
 
 router = APIRouter(tags=["documents"])
 
@@ -73,13 +79,26 @@ async def upload_document(
     persisted asset carries only metadata, a checksum, and status ``UPLOADED``.
     """
 
-    data = await file.read()
+    # UploadFile is spooled by Starlette; read at most one byte beyond the cap
+    # so an arbitrarily large request is never copied wholesale into memory.
+    data = await file.read(MAX_DOCUMENT_UPLOAD_BYTES + 1)
+    try:
+        validated = validate_document_upload(
+            filename=file.filename or "document",
+            content_type=file.content_type or "",
+            data=data,
+        )
+    except UploadValidationError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+        ) from exc
     asset = service.upload(
         user.organization_id,
         user.id,
-        filename=file.filename or "document",
-        mime_type=file.content_type or "application/octet-stream",
-        data=data,
+        filename=validated.filename,
+        mime_type=validated.mime_type,
+        data=validated.data,
         sensitivity=sensitivity,
     )
     return DocumentAssetView.model_validate(asset)
@@ -92,7 +111,7 @@ def process_document(
     document_id: UUID,
     service: DocumentService = Depends(_service),
     user: User = Depends(get_current_user),
-) -> DocumentAssetView:
+) -> DocumentAssetView | JSONResponse:
     """Parse → chunk → embed a document to ``INDEXED`` (Requirement 29.3).
 
     A cross-org/missing id yields ``404``; a document that cannot be parsed is
@@ -102,10 +121,12 @@ def process_document(
     try:
         asset = service.process(user.organization_id, user.id, document_id)
     except DocumentProcessingError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="The document could not be processed.",
-        ) from exc
+        # Return a normal response object instead of raising HTTPException.
+        # The request-scoped transaction therefore commits FAILED + reason.
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={"detail": str(exc)},
+        )
     return DocumentAssetView.model_validate(asset)
 
 
@@ -116,7 +137,7 @@ def list_documents(
 ) -> list[DocumentAssetView]:
     """List the organization's documents, newest first (Requirement 29.2)."""
 
-    assets = service.list_documents(user.organization_id)
+    assets = service.list_documents(user.organization_id, user.id)
     return [DocumentAssetView.model_validate(asset) for asset in assets]
 
 
@@ -128,7 +149,7 @@ def get_document(
 ) -> DocumentAssetView:
     """Return a single org-scoped document or ``404`` (Requirement 29.5)."""
 
-    asset = service.get_document(user.organization_id, document_id)
+    asset = service.get_document(user.organization_id, user.id, document_id)
     return DocumentAssetView.model_validate(asset)
 
 

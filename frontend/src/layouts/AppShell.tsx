@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/auth";
 import OperationalSupportDisclaimer from "@/components/OperationalSupportDisclaimer";
+import { ErrorState } from "@/components/feedback";
 import {
   findActiveNavGroup,
   NAV_GROUPS,
@@ -115,7 +116,9 @@ export default function AppShell() {
   const navigate = useNavigate();
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const mobileDialogRef = useRef<HTMLDivElement>(null);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const activeGroup = findActiveNavGroup(location.pathname);
 
@@ -134,6 +137,24 @@ export default function AppShell() {
       if (event.key === "Escape") {
         setMobileNavOpen(false);
         menuButtonRef.current?.focus();
+        return;
+      }
+      if (event.key === "Tab") {
+        const focusable = Array.from(
+          mobileDialogRef.current?.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ) ?? [],
+        ).filter((element) => element.getClientRects().length > 0);
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (!first || !last) return;
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
       }
     }
 
@@ -147,9 +168,14 @@ export default function AppShell() {
   async function handleLogout() {
     if (loggingOut) return;
     setLoggingOut(true);
+    setLogoutError(null);
     try {
       await logout();
       navigate("/login", { replace: true });
+    } catch {
+      setLogoutError(
+        "Could not log out because the service did not confirm the request. Please retry.",
+      );
     } finally {
       setLoggingOut(false);
     }
@@ -180,6 +206,7 @@ export default function AppShell() {
       {/* Mobile navigation drawer */}
       {mobileNavOpen ? (
         <div
+          ref={mobileDialogRef}
           className="fixed inset-0 z-50 md:hidden"
           role="dialog"
           aria-modal="true"
@@ -292,6 +319,12 @@ export default function AppShell() {
             </button>
           </div>
         </header>
+
+        {logoutError ? (
+          <div className="shrink-0 px-4 pt-3 sm:px-6">
+            <ErrorState message={logoutError} variant="alert" />
+          </div>
+        ) : null}
 
         <ContextTabs group={activeGroup ?? NAV_GROUPS[0]} pathname={location.pathname} />
 

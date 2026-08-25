@@ -90,7 +90,7 @@ def _seed_org_with_document(
         user.id,
         filename=f"doc-{suffix}.txt",
         mime_type="text/plain",
-        data=body or b"fallback body",
+        data=(body.hex().encode("ascii") or b"fallback body"),
         sensitivity=Sensitivity.INTERNAL,
     )
     service.process(org.id, user.id, asset.id)
@@ -129,10 +129,15 @@ def test_document_org_isolation(
 
     # -- Read: same-org succeeds, cross-org 404 -----------------------------
     assert (
-        service.get_document(owner.org.id, owner.asset_id).id == owner.asset_id
+        service.get_document(
+            owner.org.id, owner.user.id, owner.asset_id
+        ).id
+        == owner.asset_id
     )
     _assert_cross_org_404(
-        lambda: service.get_document(other.org.id, owner.asset_id)
+        lambda: service.get_document(
+            other.org.id, other.user.id, owner.asset_id
+        )
     )
 
     # -- Write (process): cross-org refused (404) ---------------------------

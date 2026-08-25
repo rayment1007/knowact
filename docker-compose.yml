@@ -14,7 +14,7 @@ services:
     container_name: knowact-postgres
     restart: unless-stopped
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     environment:
       POSTGRES_USER: knowact_app
       # Local-only credential: the container is published on localhost and holds

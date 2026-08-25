@@ -13,6 +13,7 @@ point.
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import Settings, get_settings
@@ -76,6 +77,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Create and configure a FastAPI application instance."""
 
     settings = settings or get_settings()
+    settings.validate_for_startup()
 
     app = FastAPI(
         title=settings.app_name,
@@ -91,6 +93,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["Content-Type"],
     )
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=()"
+        )
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        if settings.mode == "PRODUCTION":
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=31536000; includeSubDomains"
+            )
+        return response
 
     @app.get("/api/health", tags=["health"])
     def health() -> dict[str, str]:

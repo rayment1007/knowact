@@ -19,6 +19,7 @@ import sys
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.types import NullType
 
 from alembic import context
 
@@ -54,6 +55,33 @@ if config.config_file_name is not None:
 # the schema across core and advisor modules.
 target_metadata = Base.metadata
 
+_MANAGED_VECTOR_INDEXES = {
+    "ix_document_chunks_embedding_hnsw",
+    "ix_document_chunks_embedding_ivfflat",
+}
+
+
+def _include_object(object_, name, type_, reflected, compare_to) -> bool:
+    """Ignore vector indexes managed explicitly by migration 0007."""
+
+    del object_, reflected, compare_to
+    return not (type_ == "index" and name in _MANAGED_VECTOR_INDEXES)
+
+
+def _compare_type(
+    context_, inspected_column, metadata_column, inspected_type, metadata_type
+):
+    """Avoid false drift when pgvector reflection reports an unknown type."""
+
+    del context_, metadata_type
+    if (
+        inspected_column.table.name == "document_chunks"
+        and metadata_column.name == "embedding"
+        and isinstance(inspected_type, NullType)
+    ):
+        return False
+    return None
+
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode (emit SQL without a live DB)."""
@@ -63,7 +91,8 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        compare_type=True,
+        compare_type=_compare_type,
+        include_object=_include_object,
     )
 
     with context.begin_transaction():
@@ -82,7 +111,8 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            compare_type=True,
+            compare_type=_compare_type,
+            include_object=_include_object,
         )
 
         with context.begin_transaction():

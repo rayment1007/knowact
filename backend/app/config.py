@@ -14,8 +14,13 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+from cryptography.fernet import Fernet
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class ProductionConfigurationError(RuntimeError):
+    """Raised when a production process would start with unsafe settings."""
 
 
 class Settings(BaseSettings):
@@ -61,9 +66,9 @@ class Settings(BaseSettings):
         default="change-me-in-production",
         description="Secret key used to sign JWT bearer tokens.",
     )
-    jwt_algorithm: str = "HS256"
+    jwt_algorithm: Literal["HS256"] = "HS256"
     # Access-token lifetime in minutes.
-    access_token_expire_minutes: int = 60 * 24  # 24 hours
+    access_token_expire_minutes: int = Field(default=60 * 24, gt=0, le=60 * 24 * 30)
 
     # --- Auth cookie (HTTP-only) ---------------------------------------------
     # The signed JWT is delivered to the browser as an HTTP-only cookie so that
@@ -78,6 +83,12 @@ class Settings(BaseSettings):
     # Vite dev proxy, so "lax" is sufficient here.
     auth_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
 
+    # Exact account allowlist for this phase-one, single-user deployment.
+    # Local development may leave this empty; PRODUCTION fails startup unless
+    # exactly one non-empty address is configured. When present, the same list
+    # is enforced for password login and Google Sign-In.
+    auth_allowed_emails: list[str] = Field(default_factory=list)
+
     # --- AI provider ---------------------------------------------------------
     # "mock" (default, deterministic, no key) or "llm" (optional external LLM).
     ai_provider: Literal["mock", "llm"] = "mock"
@@ -89,9 +100,9 @@ class Settings(BaseSettings):
     # official OpenAI endpoint is used.
     llm_base_url: str | None = None
     # Request timeout (seconds) for LLM calls.
-    llm_timeout_seconds: float = 30.0
+    llm_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     # Upper bound on tokens the LLM may generate per structured-output call.
-    llm_max_output_tokens: int = 1500
+    llm_max_output_tokens: int = Field(default=1500, gt=0, le=16_384)
 
     # --- CORS ----------------------------------------------------------------
     # Origins allowed to call the API. Defaults to the Vite dev server.
@@ -126,18 +137,106 @@ class Settings(BaseSettings):
     # --- Connected Workspace Intelligence: document storage ------------------
     # Where uploaded document binaries live. "local" keeps them on the local
     # filesystem under ``storage_root`` (never in Postgres).
-    storage_backend: str = "local"
+    storage_backend: Literal["local"] = "local"
     storage_root: str = "./var/storage"
 
     # --- Connected Workspace Intelligence: embeddings ------------------------
     # "mock" (default, deterministic, no key) produces reproducible vectors for
     # local development and tests; "openai" uses the OpenAI embeddings API.
-    embedding_provider: str = "mock"
+    embedding_provider: Literal["mock", "openai"] = "mock"
     embedding_model: str = "text-embedding-3-small"
-    embedding_dimension: int = 1536
+    embedding_dimension: int = Field(default=1536, gt=0, le=4096)
     # API key for the embeddings provider. Only used when embedding_provider
     # (or ai_provider) routes through OpenAI; unset for the deterministic mock.
     openai_api_key: str | None = None
+
+    @staticmethod
+    def normalize_auth_email(email: str) -> str:
+        """Return the canonical form used for exact allowlist comparisons."""
+
+        return (email or "").strip().casefold()
+
+    def normalized_auth_allowed_emails(self) -> frozenset[str]:
+        """Return configured, non-empty account addresses in canonical form."""
+
+        return frozenset(
+            normalized
+            for email in self.auth_allowed_emails
+            if (normalized := self.normalize_auth_email(email))
+        )
+
+    def is_auth_email_allowed(self, email: str) -> bool:
+        """Apply the account allowlist to every interactive login method.
+
+        An empty list is convenient for local development and tests. Production
+        can never reach this permissive branch because :meth:`validate_for_startup`
+        requires exactly one configured owner address.
+        """
+
+        allowed = self.normalized_auth_allowed_emails()
+        if not allowed:
+            return self.mode != "PRODUCTION"
+        return self.normalize_auth_email(email) in allowed
+
+    def validate_for_startup(self) -> None:
+        """Fail closed when a production deployment is missing real secrets.
+
+        Development deliberately keeps its mock providers and localhost
+        defaults. Production must never report healthy while signing tokens
+        with the repository placeholder or silently serving fake AI/Google
+        behavior.
+        """
+
+        if self.mode != "PRODUCTION":
+            return
+
+        errors: list[str] = []
+        secret_bytes = self.jwt_secret.encode("utf-8")
+        if self.jwt_secret == "change-me-in-production" or len(secret_bytes) < 32:
+            errors.append("JWT_SECRET must be a non-default secret of at least 32 bytes")
+        if not self.auth_cookie_secure:
+            errors.append("AUTH_COOKIE_SECURE must be true")
+        normalized_allowed_emails = self.normalized_auth_allowed_emails()
+        if (
+            len(self.auth_allowed_emails) != 1
+            or len(normalized_allowed_emails) != 1
+        ):
+            errors.append(
+                "AUTH_ALLOWED_EMAILS must contain exactly one non-empty owner email"
+            )
+        if "CHANGE_ME" in self.database_url or not self.database_url.startswith(
+            ("postgresql://", "postgresql+psycopg://")
+        ):
+            errors.append("DATABASE_URL must be a configured PostgreSQL URL")
+        if self.ai_provider != "llm" or not self.llm_api_key:
+            errors.append("AI_PROVIDER=llm and LLM_API_KEY are required")
+        if self.embedding_provider != "openai" or not self.openai_api_key:
+            errors.append(
+                "EMBEDDING_PROVIDER=openai and OPENAI_API_KEY are required"
+            )
+        if not self.google_oauth_client_id or not self.google_oauth_client_secret:
+            errors.append("Google OAuth client credentials are required")
+        if not self.token_encryption_key:
+            errors.append("TOKEN_ENCRYPTION_KEY is required")
+        else:
+            try:
+                Fernet(self.token_encryption_key.encode("utf-8"))
+            except (TypeError, ValueError):
+                errors.append("TOKEN_ENCRYPTION_KEY must be a valid Fernet key")
+        if not self.frontend_base_url.startswith("https://"):
+            errors.append("FRONTEND_BASE_URL must use HTTPS")
+        if not self.google_oauth_redirect_base.startswith("https://"):
+            errors.append("GOOGLE_OAUTH_REDIRECT_BASE must use HTTPS")
+        if any(
+            origin == "*" or not origin.startswith("https://")
+            for origin in self.cors_origins
+        ):
+            errors.append("CORS_ORIGINS must contain only explicit HTTPS origins")
+
+        if errors:
+            raise ProductionConfigurationError(
+                "Unsafe production configuration: " + "; ".join(errors)
+            )
 
 
 @lru_cache

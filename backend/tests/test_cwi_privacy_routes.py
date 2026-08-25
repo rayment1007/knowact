@@ -238,7 +238,10 @@ def test_delete_email_data_retains_confirmed_derived_knowledge(
     assert resp.json()["retained_derived_records"] == 1
 
     # The confirmed business record is RETAINED (Requirement 33.8).
-    assert db_session.query(core_models.KnowledgeItem).count() == 1
+    retained = db_session.query(core_models.KnowledgeItem).one()
+    assert retained.source_item_id is None
+    # The imported raw body must actually be gone after the privacy operation.
+    assert db_session.query(core_models.SourceItem).count() == 0
     audits = (
         db_session.query(core_models.AuditLog)
         .filter(core_models.AuditLog.action_type == "DELETE_EMAIL_DATA")
@@ -246,6 +249,7 @@ def test_delete_email_data_retains_confirmed_derived_knowledge(
     )
     assert len(audits) == 1
     assert audits[0].detail["retained_derived_records"] == 1
+    assert audits[0].detail["deleted_source_items"] == 1
 
 
 # ---------------------------------------------------------------------------

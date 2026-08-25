@@ -57,6 +57,10 @@ services:
       # Neon connection string, scheme rewritten to postgresql+psycopg://
       - key: DATABASE_URL
         sync: false
+      # JSON array with exactly one owner email, for example
+      # ["owner@example.com"]. Production refuses to start if this is missing.
+      - key: AUTH_ALLOWED_EMAILS
+        sync: false
       - key: JWT_SECRET
         sync: false
       - key: TOKEN_ENCRYPTION_KEY

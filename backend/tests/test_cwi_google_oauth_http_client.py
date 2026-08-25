@@ -124,6 +124,7 @@ def _token_and_userinfo_handler(request: httpx.Request) -> httpx.Response:
             json={
                 "sub": "google-sub-42",
                 "email": "person@example.com",
+                "email_verified": True,
                 "name": "Real Person",
             },
         )
@@ -141,6 +142,7 @@ def test_exchange_signin_code_returns_identity() -> None:
         external_account_id="google-sub-42",
         email="person@example.com",
         full_name="Real Person",
+        email_verified=True,
     )
 
 
@@ -157,6 +159,54 @@ def test_exchange_service_code_returns_grant() -> None:
     assert grant.external_account_id == "google-sub-42"
     assert grant.account_email == "person@example.com"
     assert grant.expires_at > datetime.now(timezone.utc)
+
+
+def test_exchange_signin_code_rejects_unverified_email() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"access_token": "access-token"})
+        if request.url.path == "/v1/userinfo":
+            return httpx.Response(
+                200,
+                json={
+                    "sub": "google-sub-unverified",
+                    "email": "person@example.com",
+                    "email_verified": False,
+                },
+            )
+        raise AssertionError(f"unexpected request path: {request.url.path}")
+
+    with pytest.raises(GoogleOAuthError):
+        _client(handler).exchange_signin_code(
+            code="auth-code", redirect_uri="http://localhost:8000/cb"
+        )
+
+
+def test_exchange_service_code_rejects_unverified_account_email() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "access-token",
+                    "scope": GMAIL_READONLY_SCOPE,
+                },
+            )
+        if request.url.path == "/v1/userinfo":
+            return httpx.Response(
+                200,
+                json={
+                    "sub": "google-sub-unverified",
+                    "email": "person@example.com",
+                    "email_verified": False,
+                },
+            )
+        raise AssertionError(f"unexpected request path: {request.url.path}")
+
+    with pytest.raises(GoogleOAuthError):
+        _client(handler).exchange_service_code(
+            code="auth-code", redirect_uri="http://localhost:8000/cb"
+        )
 
 
 def test_refresh_access_token_returns_new_grant() -> None:

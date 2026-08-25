@@ -70,6 +70,7 @@ from app.modules.cwi.models import (
     CalendarSyncStatus,
     CopilotAnswerLog,
     EmailMessageRecord,
+    IntegrationConnection,
 )
 from app.modules.cwi.services.embedding import EmbeddingProvider
 from app.modules.cwi.services.retrieval_service import (
@@ -272,10 +273,21 @@ class CopilotService:
             for row in rows
         ]
 
-    def _search_email_sources(self, org_id: UUID) -> list[_Evidence]:
+    def _search_email_sources(
+        self, org_id: UUID, user_id: UUID
+    ) -> list[_Evidence]:
         self._assert_ask_tool("search_email_sources")
         stmt = (
             scope_select(select(EmailMessageRecord), EmailMessageRecord, org_id)
+            .join(
+                IntegrationConnection,
+                IntegrationConnection.id
+                == EmailMessageRecord.integration_connection_id,
+            )
+            .where(
+                IntegrationConnection.organization_id == org_id,
+                IntegrationConnection.user_id == user_id,
+            )
             .order_by(
                 EmailMessageRecord.received_at.desc(),
                 EmailMessageRecord.id.desc(),
@@ -466,7 +478,7 @@ class CopilotService:
         collected += self._list_recent_decisions(org_id)
         collected += self._get_client_context(org_id, business_entity_id)
         collected += self._get_upcoming_calendar_events(org_id, user_id)
-        collected += self._search_email_sources(org_id)
+        collected += self._search_email_sources(org_id, user_id)
         collected += self._search_document_chunks(
             org_id, user_id, question, business_entity_id
         )

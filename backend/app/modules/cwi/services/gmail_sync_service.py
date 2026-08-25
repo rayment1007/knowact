@@ -38,8 +38,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 from uuid import UUID
 
+from fastapi import HTTPException, status
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select
+from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
@@ -64,11 +66,15 @@ from app.modules.cwi.models import (
     EmailMessageRecord,
     EmailSenderSignal,
     EmailTaskSuggestion,
+    ConnectionStatus,
     IntegrationConnection,
+    IntegrationProvider,
+    IntegrationService as IntegrationServiceEnum,
     SenderSignalType,
 )
 from app.modules.cwi.schemas import InitialSyncOptions
 from app.modules.cwi.services.gmail_client import GmailClient, GmailMessage
+from app.modules.cwi.services.google_oauth import GMAIL_READONLY_SCOPE
 from app.modules.cwi.services.integration_service import IntegrationService
 
 # Relevance values whose content is noise: excluded from knowledge and from
@@ -175,9 +181,24 @@ class GmailSyncService:
         connection = self.db.execute(stmt).scalar_one_or_none()
         if connection is None:
             raise not_found("Integration connection not found.")
+        if (
+            connection.provider != IntegrationProvider.GOOGLE
+            or connection.service != IntegrationServiceEnum.GMAIL
+            or connection.status != ConnectionStatus.CONNECTED
+            or GMAIL_READONLY_SCOPE not in (connection.granted_scopes_json or [])
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "A connected Gmail account with gmail.readonly authorization "
+                    "is required. Reconnect Gmail and try again."
+                ),
+            )
         return connection
 
-    def _access_token(self, org_id: UUID, connection_id: UUID) -> str:
+    def _access_token(
+        self, org_id: UUID, user_id: UUID, connection_id: UUID
+    ) -> str:
         """Obtain a valid (refreshed if needed) access token for the connection.
 
         Uses the injected :class:`IntegrationService` when provided. The token
@@ -187,16 +208,20 @@ class GmailSyncService:
 
         if self._integration_service is not None:
             return self._integration_service.get_valid_access_token(
-                org_id, connection_id
+                org_id,
+                user_id,
+                connection_id,
+                expected_service=IntegrationServiceEnum.GMAIL,
+                required_scopes=(GMAIL_READONLY_SCOPE,),
             )
         # Fallback: no OAuth client available; the fake Gmail client ignores the
         # token anyway, so return an empty transient value.
         return ""
 
     def _matching_sender_signal(
-        self, org_id: UUID, sender: str
+        self, org_id: UUID, user_id: UUID, sender: str
     ) -> SenderSignalType | None:
-        """Return the negative signal for ``sender``'s address or domain, if any."""
+        """Return this user's signal for ``sender``'s address/domain, if any."""
 
         address = (sender or "").strip().lower()
         if not address:
@@ -206,18 +231,24 @@ class GmailSyncService:
             patterns.append(address.split("@", 1)[1])
         stmt = scope_select(
             select(EmailSenderSignal), EmailSenderSignal, org_id
-        ).where(EmailSenderSignal.pattern.in_(patterns))
+        ).where(
+            EmailSenderSignal.created_by == user_id,
+            EmailSenderSignal.pattern.in_(patterns),
+        )
         signal = self.db.execute(stmt).scalars().first()
         return signal.signal_type if signal is not None else None
 
     def _find_existing(
-        self, org_id: UUID, content_hash: str
+        self, org_id: UUID, connection_id: UUID, content_hash: str
     ) -> EmailMessageRecord | None:
-        """Return an existing record with the same ``(org, content_hash)``."""
+        """Return an existing record with the same connection-scoped hash."""
 
         stmt = scope_select(
             select(EmailMessageRecord), EmailMessageRecord, org_id
-        ).where(EmailMessageRecord.content_hash == content_hash)
+        ).where(
+            EmailMessageRecord.integration_connection_id == connection_id,
+            EmailMessageRecord.content_hash == content_hash,
+        )
         return self.db.execute(stmt).scalars().first()
 
     # -- Eligibility (Requirements 26.1, 26.2, 26.3) ------------------------
@@ -269,7 +300,7 @@ class GmailSyncService:
         """
 
         content_hash = compute_content_hash(message)
-        if self._find_existing(org_id, content_hash) is not None:
+        if self._find_existing(org_id, connection.id, content_hash) is not None:
             run.skipped_duplicates += 1
             return None
 
@@ -313,7 +344,11 @@ class GmailSyncService:
         run.record_ids.append(record.id)
 
         # 3) Classify (SUGGESTED only) — biased by a sender/domain signal.
-        signal = self._matching_sender_signal(org_id, message.sender)
+        signal = self._matching_sender_signal(
+            org_id,
+            connection.user_id,
+            message.sender,
+        )
         classifier = self._classifier
         if signal is not None:
             forced = (
@@ -340,6 +375,51 @@ class GmailSyncService:
             org_id, connection, message, source_item, record, classification
         )
         return record
+
+    def _ingest_message_race_safe(
+        self,
+        org_id: UUID,
+        connection: IntegrationConnection,
+        message: GmailMessage,
+        opts: InitialSyncOptions,
+        run: SyncRun,
+    ) -> EmailMessageRecord | None:
+        """Ingest inside a savepoint and reconcile a concurrent duplicate."""
+
+        source_count = run.source_items_created
+        record_count = run.records_created
+        record_ids_count = len(run.record_ids)
+        try:
+            with self.db.begin_nested():
+                return self._ingest_message(
+                    org_id, connection, message, opts, run
+                )
+        except IntegrityError:
+            # The database uniqueness constraints are the final race guard.
+            # Roll back only this message's savepoint, then verify the winner
+            # really is the same Gmail message/content before treating it as a
+            # harmless duplicate.
+            content_hash = compute_content_hash(message)
+            existing = self.db.execute(
+                scope_select(
+                    select(EmailMessageRecord), EmailMessageRecord, org_id
+                ).where(
+                    EmailMessageRecord.integration_connection_id
+                    == connection.id,
+                    or_(
+                        EmailMessageRecord.content_hash == content_hash,
+                        EmailMessageRecord.gmail_message_id
+                        == message.gmail_message_id,
+                    ),
+                )
+            ).scalars().first()
+            if existing is None:
+                raise
+            run.source_items_created = source_count
+            run.records_created = record_count
+            del run.record_ids[record_ids_count:]
+            run.skipped_duplicates += 1
+            return None
 
     def _maybe_create_task_suggestion(
         self,
@@ -411,7 +491,7 @@ class GmailSyncService:
         """
 
         connection = self._get_connection(org_id, connection_id, user_id)
-        token = self._access_token(org_id, connection_id)
+        token = self._access_token(org_id, user_id, connection_id)
         label_ids = list(opts.labels) if opts.labels else None
         messages = self.gmail.list_messages(
             access_token=token, label_ids=label_ids
@@ -424,7 +504,9 @@ class GmailSyncService:
             if not self._is_eligible(message, opts, now):
                 run.skipped_ineligible += 1
                 continue
-            self._ingest_message(org_id, connection, message, opts, run)
+            self._ingest_message_race_safe(
+                org_id, connection, message, opts, run
+            )
 
         run.suggestions_created = self._count_suggestions(org_id, run.record_ids)
         connection.last_sync_at = now
@@ -444,7 +526,7 @@ class GmailSyncService:
         """
 
         connection = self._get_connection(org_id, connection_id, user_id)
-        token = self._access_token(org_id, connection_id)
+        token = self._access_token(org_id, user_id, connection_id)
         messages = self.gmail.list_messages(access_token=token)
 
         # Permissive defaults for an incremental pull; dedup does the rest.
@@ -464,7 +546,9 @@ class GmailSyncService:
             if not opts.include_sent and _SENT_LABEL in set(message.labels):
                 run.skipped_ineligible += 1
                 continue
-            self._ingest_message(org_id, connection, message, opts, run)
+            self._ingest_message_race_safe(
+                org_id, connection, message, opts, run
+            )
 
         run.suggestions_created = self._count_suggestions(org_id, run.record_ids)
         connection.last_sync_at = now
@@ -485,12 +569,24 @@ class GmailSyncService:
     # -- Message records & task suggestions (read + lifecycle) --------------
 
     def list_message_records(
-        self, org_id: UUID, connection_id: UUID | None = None
+        self,
+        org_id: UUID,
+        user_id: UUID,
+        connection_id: UUID | None = None,
     ) -> list[EmailMessageRecord]:
-        """Return the org's ingested email records, newest first (Req 27.9)."""
+        """Return the user's ingested email records, newest first (Req 27.9)."""
 
-        stmt = scope_select(
-            select(EmailMessageRecord), EmailMessageRecord, org_id
+        stmt = (
+            scope_select(select(EmailMessageRecord), EmailMessageRecord, org_id)
+            .join(
+                IntegrationConnection,
+                IntegrationConnection.id
+                == EmailMessageRecord.integration_connection_id,
+            )
+            .where(
+                IntegrationConnection.organization_id == org_id,
+                IntegrationConnection.user_id == user_id,
+            )
         )
         if connection_id is not None:
             stmt = stmt.where(
@@ -503,25 +599,53 @@ class GmailSyncService:
         return list(self.db.execute(stmt).scalars().all())
 
     def get_message_record(
-        self, org_id: UUID, record_id: UUID
+        self, org_id: UUID, user_id: UUID, record_id: UUID
     ) -> EmailMessageRecord:
-        """Return one org-scoped record or ``404`` (Requirement 27.9 / P13)."""
+        """Return one org-and-user-scoped record or ``404``."""
 
-        stmt = scope_select(
-            select(EmailMessageRecord), EmailMessageRecord, org_id
-        ).where(EmailMessageRecord.id == record_id)
+        stmt = (
+            scope_select(select(EmailMessageRecord), EmailMessageRecord, org_id)
+            .join(
+                IntegrationConnection,
+                IntegrationConnection.id
+                == EmailMessageRecord.integration_connection_id,
+            )
+            .where(
+                EmailMessageRecord.id == record_id,
+                IntegrationConnection.organization_id == org_id,
+                IntegrationConnection.user_id == user_id,
+            )
+        )
         record = self.db.execute(stmt).scalar_one_or_none()
         if record is None:
             raise not_found("Email message record not found.")
         return record
 
     def list_task_suggestions(
-        self, org_id: UUID, record_id: UUID | None = None
+        self,
+        org_id: UUID,
+        user_id: UUID,
+        record_id: UUID | None = None,
     ) -> list[EmailTaskSuggestion]:
-        """Return the org's task suggestions, newest first (Requirement 27.6)."""
+        """Return the user's task suggestions, newest first (Requirement 27.6)."""
 
-        stmt = scope_select(
-            select(EmailTaskSuggestion), EmailTaskSuggestion, org_id
+        stmt = (
+            scope_select(select(EmailTaskSuggestion), EmailTaskSuggestion, org_id)
+            .join(
+                EmailMessageRecord,
+                EmailMessageRecord.id
+                == EmailTaskSuggestion.email_message_record_id,
+            )
+            .join(
+                IntegrationConnection,
+                IntegrationConnection.id
+                == EmailMessageRecord.integration_connection_id,
+            )
+            .where(
+                EmailMessageRecord.organization_id == org_id,
+                IntegrationConnection.organization_id == org_id,
+                IntegrationConnection.user_id == user_id,
+            )
         )
         if record_id is not None:
             stmt = stmt.where(
@@ -534,11 +658,27 @@ class GmailSyncService:
         return list(self.db.execute(stmt).scalars().all())
 
     def _get_task_suggestion(
-        self, org_id: UUID, suggestion_id: UUID
+        self, org_id: UUID, user_id: UUID, suggestion_id: UUID
     ) -> EmailTaskSuggestion:
-        stmt = scope_select(
-            select(EmailTaskSuggestion), EmailTaskSuggestion, org_id
-        ).where(EmailTaskSuggestion.id == suggestion_id)
+        stmt = (
+            scope_select(select(EmailTaskSuggestion), EmailTaskSuggestion, org_id)
+            .join(
+                EmailMessageRecord,
+                EmailMessageRecord.id
+                == EmailTaskSuggestion.email_message_record_id,
+            )
+            .join(
+                IntegrationConnection,
+                IntegrationConnection.id
+                == EmailMessageRecord.integration_connection_id,
+            )
+            .where(
+                EmailTaskSuggestion.id == suggestion_id,
+                EmailMessageRecord.organization_id == org_id,
+                IntegrationConnection.organization_id == org_id,
+                IntegrationConnection.user_id == user_id,
+            )
+        )
         suggestion = self.db.execute(stmt).scalar_one_or_none()
         if suggestion is None:
             raise not_found("Email task suggestion not found.")
@@ -556,7 +696,7 @@ class GmailSyncService:
         Property 20).
         """
 
-        suggestion = self._get_task_suggestion(org_id, suggestion_id)
+        suggestion = self._get_task_suggestion(org_id, user_id, suggestion_id)
         suggestion.status = SuggestionStatus.CONFIRMED
 
         action = ActionItem(
@@ -590,6 +730,7 @@ class GmailSyncService:
     def edit_task_suggestion(
         self,
         org_id: UUID,
+        user_id: UUID,
         suggestion_id: UUID,
         *,
         title: str | None = None,
@@ -607,7 +748,7 @@ class GmailSyncService:
         confirm/reject.
         """
 
-        suggestion = self._get_task_suggestion(org_id, suggestion_id)
+        suggestion = self._get_task_suggestion(org_id, user_id, suggestion_id)
         fields = _fields_set or set()
         if "title" in fields and title is not None:
             suggestion.title = title
@@ -626,22 +767,22 @@ class GmailSyncService:
         return suggestion
 
     def reject_task_suggestion(
-        self, org_id: UUID, suggestion_id: UUID
+        self, org_id: UUID, user_id: UUID, suggestion_id: UUID
     ) -> EmailTaskSuggestion:
         """Reject a task suggestion, retaining it as a negative signal (27.7)."""
 
-        suggestion = self._get_task_suggestion(org_id, suggestion_id)
+        suggestion = self._get_task_suggestion(org_id, user_id, suggestion_id)
         suggestion.status = SuggestionStatus.REJECTED
         self.db.add(suggestion)
         self.db.flush()
         return suggestion
 
     def dismiss_task_suggestion(
-        self, org_id: UUID, suggestion_id: UUID
+        self, org_id: UUID, user_id: UUID, suggestion_id: UUID
     ) -> EmailTaskSuggestion:
         """Dismiss a task suggestion (retained as ``REJECTED``) (Req 27.7)."""
 
-        return self.reject_task_suggestion(org_id, suggestion_id)
+        return self.reject_task_suggestion(org_id, user_id, suggestion_id)
 
     # -- Delete (permanent) -------------------------------------------------
 
@@ -666,7 +807,7 @@ class GmailSyncService:
             HTTPException: ``404`` if the record does not exist for the org.
         """
 
-        record = self.get_message_record(org_id, record_id)
+        record = self.get_message_record(org_id, user_id, record_id)
 
         self.db.execute(
             sa_delete(EmailTaskSuggestion).where(
@@ -707,7 +848,7 @@ class GmailSyncService:
             HTTPException: ``404`` if the suggestion does not exist for the org.
         """
 
-        suggestion = self._get_task_suggestion(org_id, suggestion_id)
+        suggestion = self._get_task_suggestion(org_id, user_id, suggestion_id)
 
         deleted_id = suggestion.id
         self.db.delete(suggestion)
@@ -735,9 +876,9 @@ class GmailSyncService:
     ) -> EmailSenderSignal:
         """Mark a sender address or domain ``PERSONAL``/``IRRELEVANT``.
 
-        Records (or updates) a single negative signal per
-        ``(organization_id, pattern)`` reused by future classification
-        (Requirement 27.7). ``pattern`` is lower-cased for stable matching.
+        Records (or updates) a single negative signal per user and pattern,
+        reused only by that user's future classification (Requirement 27.7).
+        ``pattern`` is lower-cased for stable matching.
         """
 
         normalized = (pattern or "").strip().lower()
@@ -746,7 +887,10 @@ class GmailSyncService:
 
         stmt = scope_select(
             select(EmailSenderSignal), EmailSenderSignal, org_id
-        ).where(EmailSenderSignal.pattern == normalized)
+        ).where(
+            EmailSenderSignal.created_by == user_id,
+            EmailSenderSignal.pattern == normalized,
+        )
         signal = self.db.execute(stmt).scalar_one_or_none()
         if signal is None:
             signal = EmailSenderSignal(

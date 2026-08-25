@@ -31,8 +31,9 @@ deterministic fake and no real OAuth call ever occurs.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import jwt
@@ -53,6 +54,7 @@ from app.modules.cwi.services.google_oauth import (
     CALENDAR_EVENTS_SCOPE,
     GMAIL_COMPOSE_SCOPE,
     GMAIL_READONLY_SCOPE,
+    OIDC_SIGNIN_SCOPES,
     GoogleOAuthClient,
     GoogleOAuthError,
 )
@@ -80,6 +82,7 @@ _SERVICE_SCOPES: dict[IntegrationServiceEnum, list[str]] = {
 # The signed-state ``purpose`` claim so a sign-in state can never be replayed as
 # an integration-authorization state (or vice versa).
 _STATE_PURPOSE = "cwi_integration_authz"
+_STATE_TTL_MINUTES = 10
 
 
 @dataclass(frozen=True)
@@ -134,6 +137,7 @@ class IntegrationService:
             "service": service.value,
             "nonce": uuid4().hex,
             "iat": now,
+            "exp": now + timedelta(minutes=_STATE_TTL_MINUTES),
         }
         return jwt.encode(
             payload,
@@ -201,7 +205,12 @@ class IntegrationService:
         connected. No connection is created yet.
         """
 
-        scopes = _SERVICE_SCOPES[service]
+        # UserInfo is used to bind the grant to a verified Google account, so
+        # service authorization needs identity scopes in addition to the narrow
+        # capability scopes. Basic sign-in remains a separate flow.
+        scopes = list(
+            dict.fromkeys([*OIDC_SIGNIN_SCOPES, *_SERVICE_SCOPES[service]])
+        )
         state = self._encode_state(org_id, user_id, service)
         url = self.oauth.build_service_url(
             scopes=scopes,
@@ -232,6 +241,18 @@ class IntegrationService:
         except GoogleOAuthError as exc:
             # Authorization could not be completed; nothing is persisted.
             raise not_found("Integration connection not found.") from exc
+
+        required_scopes = set(_SERVICE_SCOPES[service])
+        granted_scopes = set(grant.granted_scopes)
+        if (
+            not required_scopes.issubset(granted_scopes)
+            or not grant.external_account_id
+            or not grant.account_email
+        ):
+            # Do not persist a partially-authorized or unbound connection. The
+            # browser callback deliberately receives the same generic failure as
+            # any other failed authorization.
+            raise not_found("Integration connection not found.")
 
         access_encrypted = self.vault.encrypt(grant.access_token)
         refresh_encrypted = (
@@ -316,7 +337,13 @@ class IntegrationService:
         return self._get_scoped(org_id, connection_id, user_id)
 
     def get_valid_access_token(
-        self, org_id: UUID, connection_id: UUID
+        self,
+        org_id: UUID,
+        user_id: UUID,
+        connection_id: UUID,
+        *,
+        expected_service: IntegrationServiceEnum | None = None,
+        required_scopes: Iterable[str] = (),
     ) -> str:
         """Return a valid (refreshed if needed) decrypted access token.
 
@@ -330,7 +357,23 @@ class IntegrationService:
         is never logged or persisted in the clear.
         """
 
-        connection = self._get_scoped(org_id, connection_id)
+        connection = self._get_scoped(org_id, connection_id, user_id)
+
+        if connection.status != ConnectionStatus.CONNECTED:
+            raise GoogleOAuthError(
+                "Integration is disconnected or expired. Please reconnect."
+            )
+        if expected_service is not None and connection.service != expected_service:
+            raise GoogleOAuthError(
+                "This connection is not authorized for the requested service."
+            )
+        missing_scopes = set(required_scopes).difference(
+            connection.granted_scopes_json or []
+        )
+        if missing_scopes:
+            raise GoogleOAuthError(
+                "Required Google authorization is missing. Please reconnect."
+            )
 
         now = datetime.now(timezone.utc)
         expires_at = connection.token_expires_at

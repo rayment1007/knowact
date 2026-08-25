@@ -17,7 +17,9 @@ outside its sandbox.
 
 from __future__ import annotations
 
+import os
 import shutil
+import uuid
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 from uuid import UUID
@@ -70,9 +72,19 @@ class LocalFilesystemStorage:
     def put(
         self, org_id: UUID, key: str, data: bytes, content_type: str
     ) -> str:
+        del content_type
         path = self._object_path(org_id, key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary_path.open("xb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary_path.replace(path)
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
         return key
 
     def get(self, org_id: UUID, key: str) -> bytes:

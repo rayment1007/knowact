@@ -37,12 +37,21 @@ const UNAUTHENTICATED: SessionState = {
   organization: null,
 };
 
+const LOADING: SessionState = {
+  status: "loading",
+  user: null,
+  organization: null,
+};
+
+const SESSION_ERROR: SessionState = {
+  status: "error",
+  user: null,
+  organization: null,
+};
+
 export default function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<SessionState>({
-    status: "loading",
-    user: null,
-    organization: null,
-  });
+  const [session, setSession] = useState<SessionState>(LOADING);
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
 
   // React to global 401s: drop the session so ProtectedRoute redirects.
   useEffect(() => {
@@ -58,6 +67,7 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
 
     async function restore() {
+      setSession(LOADING);
       try {
         const me = await authApi.getCurrentUser();
         if (!cancelled) {
@@ -67,9 +77,15 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
             organization: me.organization,
           });
         }
-      } catch {
-        // No valid session cookie (401) or unreachable backend.
-        if (!cancelled) setSession(UNAUTHENTICATED);
+      } catch (error) {
+        if (cancelled) return;
+        // Only an explicit 401 proves that there is no valid session. A
+        // network/5xx failure leaves the session unknown and must be retryable.
+        setSession(
+          error instanceof ApiError && error.status === 401
+            ? UNAUTHENTICATED
+            : SESSION_ERROR,
+        );
       }
     }
 
@@ -77,6 +93,10 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
+  }, [restoreAttempt]);
+
+  const retrySession = useCallback(() => {
+    setRestoreAttempt((attempt) => attempt + 1);
   }, []);
 
   const login = useCallback(async (credentials: LoginRequest) => {
@@ -92,7 +112,11 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
         organization: me.organization,
       });
     } catch (error) {
-      setSession(UNAUTHENTICATED);
+      setSession(
+        error instanceof ApiError && error.status === 401
+          ? UNAUTHENTICATED
+          : SESSION_ERROR,
+      );
       throw error;
     }
   }, []);
@@ -100,14 +124,16 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     try {
       await authApi.logout();
-    } catch (error) {
-      // A 401 (already logged out / expired) is fine; anything else is
-      // best-effort and should not block clearing the local session.
-      if (!(error instanceof ApiError)) {
-        // swallow network errors on logout
-      }
-    } finally {
       setSession(UNAUTHENTICATED);
+    } catch (error) {
+      // An expired session is already logged out. For network/5xx failures the
+      // HTTP-only cookie may still be valid, so retain local state and let the
+      // caller show a retryable error instead of claiming logout succeeded.
+      if (error instanceof ApiError && error.status === 401) {
+        setSession(UNAUTHENTICATED);
+        return;
+      }
+      throw error;
     }
   }, []);
 
@@ -116,12 +142,13 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       status: session.status,
       isLoading: session.status === "loading",
       isAuthenticated: session.status === "authenticated",
+      retrySession,
       user: session.user,
       organization: session.organization,
       login,
       logout,
     }),
-    [session, login, logout],
+    [session, login, logout, retrySession],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

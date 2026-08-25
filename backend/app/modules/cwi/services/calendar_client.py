@@ -25,6 +25,8 @@ dependency that routes override in tests with a pre-seeded fake.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -40,21 +42,18 @@ logger = logging.getLogger(__name__)
 def _log_calendar_error(operation: str, exc: Exception) -> None:
     """Log the underlying Calendar API failure for diagnosis (secret-free).
 
-    The Bearer token lives only in the request header, never the response, so
-    logging the Google API response status + body is safe and surfaces the real
-    reason a call failed (e.g. insufficient scope, invalid event body) that the
-    caller otherwise wraps in a generic message.
+    Provider response bodies can contain event or attendee data, so only a
+    status code and exception class are recorded.
     """
 
     if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
         logger.error(
-            "Calendar %s failed: HTTP %s -> %s",
+            "Calendar %s failed: HTTP %s",
             operation,
             exc.response.status_code,
-            exc.response.text[:1000],
         )
     else:
-        logger.error("Calendar %s failed: %r", operation, exc)
+        logger.error("Calendar %s failed: %s", operation, type(exc).__name__)
 
 
 #: Base URL for the Google Calendar API v3.
@@ -65,6 +64,13 @@ _HTTP_TIMEOUT_SECONDS = 15
 
 #: Access roles that permit writing events to a calendar (Requirement 28.3).
 _WRITABLE_ROLES = frozenset({"owner", "writer"})
+
+
+def _event_id_for_idempotency_key(idempotency_key: str) -> str:
+    """Map any internal key to Google's base32hex-compatible event id."""
+
+    digest = hashlib.sha256(idempotency_key.encode("utf-8")).digest()
+    return base64.b32hexencode(digest).decode("ascii").lower().rstrip("=")
 
 
 @dataclass(frozen=True)
@@ -359,12 +365,21 @@ class HttpCalendarClient:
         event: CalendarEventInput,
         idempotency_key: str,
     ) -> str:
+        event_id = _event_id_for_idempotency_key(idempotency_key)
+        body = _event_body(event)
+        body["id"] = event_id
         try:
             with self._client(access_token) as http:
                 resp = http.post(
                     f"/calendars/{calendar_id}/events",
-                    json=_event_body(event),
+                    json=body,
                 )
+                if resp.status_code == 409:
+                    existing = http.get(
+                        f"/calendars/{calendar_id}/events/{event_id}"
+                    )
+                    existing.raise_for_status()
+                    return str(existing.json()["id"])
                 resp.raise_for_status()
                 return str(resp.json()["id"])
         except (httpx.HTTPError, KeyError, ValueError) as exc:

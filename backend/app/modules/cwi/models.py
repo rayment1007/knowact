@@ -150,12 +150,12 @@ class EmailDraftStatus(str, enum.Enum):
     A draft is created ``AI_SUGGESTED`` from the provider's structured output,
     approved by a human (``USER_APPROVED``), optionally materialized as a real
     Gmail draft (``GMAIL_DRAFT_CREATED``), and — only after a *separate* explicit
-    confirmation — sent. ``SENDING`` is the in-flight guard that makes the send
-    idempotent: a single-row atomic compare-and-set moves the draft into
-    ``SENDING`` before any Gmail send, so a retried/concurrent send observes
-    ``SENDING``/``SENT`` and returns the existing sent message id without sending
-    again (Requirement 32.8 / Property 17). ``REJECTED`` and ``FAILED`` are the
-    terminal non-sent states. Email is **never** sent automatically.
+    confirmation — sent. ``SENDING`` is the local in-flight guard: a single-row
+    atomic compare-and-set moves the draft into ``SENDING`` before any Gmail
+    send, so a concurrent local request does not issue another call. Because a
+    transport failure can leave Gmail's outcome unknown, ``FAILED`` is terminal
+    and requires checking Gmail Sent rather than blind retry. ``REJECTED`` is
+    also terminal. Email is **never** sent automatically.
     """
 
     AI_SUGGESTED = "AI_SUGGESTED"
@@ -363,9 +363,8 @@ class EmailMessageRecord(OrganizationScopedMixin, Base):
     * a unique constraint on ``(organization_id, integration_connection_id,
       gmail_message_id)`` so the same Gmail message never yields two records for
       one connection; and
-    * a ``(organization_id, content_hash)`` index that backs the content-hash
-      dedup lookup :class:`GmailSyncService` performs before ingesting, so a
-      message whose normalized content was already ingested is skipped.
+    * a unique ``(integration_connection_id, content_hash)`` constraint that
+      makes content dedup both mailbox-scoped and race-safe.
     """
 
     __tablename__ = "email_message_records"
@@ -410,10 +409,10 @@ class EmailMessageRecord(OrganizationScopedMixin, Base):
             "gmail_message_id",
             name="uq_email_message_connection_gmail_id",
         ),
-        Index(
-            "ix_email_message_records_org_content_hash",
-            "organization_id",
+        UniqueConstraint(
+            "integration_connection_id",
             "content_hash",
+            name="uq_email_message_connection_content_hash",
         ),
     )
 
@@ -489,10 +488,10 @@ class EmailSenderSignal(OrganizationScopedMixin, Base):
     """A negative signal marking a sender address or domain (Requirement 27.7).
 
     When a user marks a sender or domain ``PERSONAL`` or ``IRRELEVANT``, this
-    row is recorded (one active signal per ``(organization_id, pattern)``) and
-    reused by future Gmail ingestion to bias classification away from the
-    knowledge base. ``pattern`` is a lower-cased email address (``a@b.com``) or a
-    bare domain (``b.com``).
+    row is recorded (one active signal per user and pattern) and reused only by
+    that user's future Gmail ingestion to bias classification away from the
+    knowledge base. ``pattern`` is a lower-cased email address (``a@b.com``) or
+    a bare domain (``b.com``).
     """
 
     __tablename__ = "email_sender_signals"
@@ -517,8 +516,9 @@ class EmailSenderSignal(OrganizationScopedMixin, Base):
     __table_args__ = (
         UniqueConstraint(
             "organization_id",
+            "created_by",
             "pattern",
-            name="uq_email_sender_signal_org_pattern",
+            name="uq_email_sender_signal_org_user_pattern",
         ),
     )
 
@@ -629,6 +629,7 @@ class DocumentAsset(OrganizationScopedMixin, Base):
         nullable=False,
         default=DocumentProcessingStatus.UPLOADED,
     )
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     sensitivity: Mapped[Sensitivity] = mapped_column(
         SAEnum(Sensitivity, name="sensitivity"),
         nullable=False,
@@ -688,6 +689,11 @@ class DocumentChunk(OrganizationScopedMixin, Base):
     created_at: Mapped[datetime] = _created_at()
 
     __table_args__ = (
+        UniqueConstraint(
+            "document_asset_id",
+            "chunk_index",
+            name="uq_document_chunks_asset_index",
+        ),
         Index(
             "ix_document_chunks_org_asset",
             "organization_id",
@@ -715,11 +721,12 @@ class EmailDraft(OrganizationScopedMixin, Base):
     * **Backend-resolved recipients only.** ``to_recipients_json`` holds the
       addresses the *backend* resolved and validated; the LLM never invents
       them (Requirement 32.2).
-    * **Idempotent send.** ``send_idempotency_key`` is a stable per-draft key
-      passed to Gmail and used together with an atomic status compare-and-set
-      into ``SENDING`` so a retried/concurrent send never produces a second
-      message (Requirement 32.8 / Property 17). ``gmail_sent_message_id`` is set
-      exactly once, on the winning send.
+    * **Duplicate-send guard.** ``send_idempotency_key`` is a stable per-draft
+      correlation key used together with an atomic status compare-and-set into
+      ``SENDING`` so only one local request initiates a send. An ambiguous Gmail
+      transport failure is terminal locally because the API does not provide an
+      idempotency guarantee for this request. ``gmail_sent_message_id`` is set
+      only after a confirmed response.
     * **Org + user scoping.** Every row carries ``organization_id`` (mixin) and
       ``user_id``; a cross-org draft id is indistinguishable from a missing one
       and yields ``404`` (Requirement 32.12 / Property 13).
@@ -769,11 +776,11 @@ class EmailDraft(OrganizationScopedMixin, Base):
     )
     # Set by users.drafts.create; nullable until a Gmail draft is materialized.
     gmail_draft_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # Set exactly once by the winning users.drafts.send (Property 17).
+    # Set only after a confirmed users.drafts.send response.
     gmail_sent_message_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )
-    # Stable per-draft key: guards duplicate sends under retry (Requirement 32.8).
+    # Stable per-draft correlation key used by the local duplicate-send guard.
     send_idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
@@ -846,7 +853,8 @@ class CopilotAnswerLog(OrganizationScopedMixin, Base):
     was insufficient, the exact citations returned, and the full bounded
     evidence set supplied to the model — so the Privacy_Service can later return
     the exact citations/evidence that grounded a given answer id. Org- and
-    user-scoped; a cross-org answer id is indistinguishable from a missing one.
+    user-scoped; another user's or cross-org answer id is indistinguishable
+    from a missing one.
 
     This is a transparency log, not a business mutation — it never writes an
     :class:`~app.core.models.AuditLog` row.

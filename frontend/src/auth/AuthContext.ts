@@ -8,7 +8,11 @@ import { createContext } from "react";
 import type { LoginRequest, Organization, User } from "@/api";
 
 /** Lifecycle of the session as known by the frontend. */
-export type AuthStatus = "loading" | "authenticated" | "unauthenticated";
+export type AuthStatus =
+  | "loading"
+  | "authenticated"
+  | "unauthenticated"
+  | "error";
 
 export interface AuthContextValue {
   status: AuthStatus;
@@ -16,6 +20,8 @@ export interface AuthContextValue {
   isLoading: boolean;
   /** True once the user is confirmed authenticated. */
   isAuthenticated: boolean;
+  /** Retry the current-session probe after a temporary backend/network error. */
+  retrySession: () => void;
   /** The current user, or null when not authenticated. */
   user: User | null;
   /** The current user's organization, or null when not authenticated. */
@@ -26,7 +32,10 @@ export interface AuthContextValue {
    * from `GET /api/auth/me`. Throws `ApiError(401)` on invalid credentials.
    */
   login: (credentials: LoginRequest) => Promise<void>;
-  /** Clear the session: ask the server to delete the cookie and reset state. */
+  /**
+   * Ask the server to delete the cookie, then reset local state. Rejects when
+   * the server cannot confirm logout so the UI never reports a false success.
+   */
   logout: () => Promise<void>;
 }
 

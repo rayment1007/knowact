@@ -16,7 +16,7 @@
 // they mutate business memory. Loading / empty / error states reuse the shared
 // feedback components; suggestions reuse the shared SuggestionCard.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ApiError, gmailApi, integrationsApi } from "@/api";
 import type {
@@ -381,6 +381,9 @@ export default function GmailSyncPage() {
     useState<EmailMessageRecord | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const connectionsRequestGeneration = useRef(0);
+  const ingestedRequestGeneration = useRef(0);
+  const detailRequestGeneration = useRef(0);
 
   const [signalPattern, setSignalPattern] = useState("");
   const [signalType, setSignalType] = useState<SenderSignalType>("PERSONAL");
@@ -395,16 +398,21 @@ export default function GmailSyncPage() {
   );
 
   const loadOpenedMessage = useCallback(async () => {
+    const requestGeneration = ++detailRequestGeneration.current;
     if (!emailId) {
       setOpenedMessage(null);
       setDetailError(null);
+      setDetailLoading(false);
       return;
     }
     setDetailLoading(true);
     setDetailError(null);
     try {
-      setOpenedMessage(await gmailApi.getMessage(emailId));
+      const result = await gmailApi.getMessage(emailId);
+      if (requestGeneration !== detailRequestGeneration.current) return;
+      setOpenedMessage(result);
     } catch (err) {
+      if (requestGeneration !== detailRequestGeneration.current) return;
       setOpenedMessage(null);
       setDetailError(
         err instanceof ApiError && err.status === 404
@@ -412,19 +420,26 @@ export default function GmailSyncPage() {
           : "Could not load the opened email. Please retry.",
       );
     } finally {
-      setDetailLoading(false);
+      if (requestGeneration === detailRequestGeneration.current) {
+        setDetailLoading(false);
+      }
     }
   }, [emailId]);
 
   useEffect(() => {
     void loadOpenedMessage();
+    return () => {
+      detailRequestGeneration.current += 1;
+    };
   }, [loadOpenedMessage]);
 
   const loadConnections = useCallback(async () => {
+    const requestGeneration = ++connectionsRequestGeneration.current;
     setLoading(true);
     setError(null);
     try {
       const result = await integrationsApi.list();
+      if (requestGeneration !== connectionsRequestGeneration.current) return;
       setConnections(result);
       const firstGmail = result.find(
         (connection) =>
@@ -432,31 +447,43 @@ export default function GmailSyncPage() {
       );
       setSelectedId((current) => current ?? firstGmail?.id ?? null);
     } catch {
+      if (requestGeneration !== connectionsRequestGeneration.current) return;
       setError("Could not load your Gmail connections. Please retry.");
     } finally {
-      setLoading(false);
+      if (requestGeneration === connectionsRequestGeneration.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
   const loadIngested = useCallback(async () => {
+    const requestGeneration = ++ingestedRequestGeneration.current;
     try {
       const [msgs, sugg] = await Promise.all([
         gmailApi.listMessages(),
         gmailApi.listSuggestions(),
       ]);
+      if (requestGeneration !== ingestedRequestGeneration.current) return;
       setMessages(msgs);
       setSuggestions(sugg);
     } catch {
+      if (requestGeneration !== ingestedRequestGeneration.current) return;
       setActionError("Could not load ingested email. Please retry.");
     }
   }, []);
 
   useEffect(() => {
     void loadConnections();
+    return () => {
+      connectionsRequestGeneration.current += 1;
+    };
   }, [loadConnections]);
 
   useEffect(() => {
     void loadIngested();
+    return () => {
+      ingestedRequestGeneration.current += 1;
+    };
   }, [loadIngested]);
 
   const handleInitialSync = useCallback(
