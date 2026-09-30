@@ -19,56 +19,10 @@ export interface WorkspaceNavGroup {
  * aliases keep future detail views associated with the correct group and tab.
  */
 export const NAV_GROUPS = [
-  {
-    label: "Dashboard",
-    showContextTabs: false,
-    pages: [{ label: "Dashboard", to: "/" }],
-  },
-  {
-    label: "Sources",
-    showContextTabs: true,
-    pages: [
-      { label: "Inbox", to: "/source-inbox" },
-      { label: "Gmail", to: "/gmail", routeAliases: ["/emails"] },
-      { label: "Files", to: "/documents" },
-    ],
-  },
-  {
-    label: "Knowledge",
-    showContextTabs: true,
-    pages: [
-      { label: "Hub", to: "/knowledge" },
-      { label: "Decisions", to: "/decisions" },
-      { label: "Verification", to: "/verification" },
-    ],
-  },
-  {
-    label: "Actions",
-    showContextTabs: false,
-    pages: [
-      {
-        label: "Action Center",
-        to: "/actions",
-        routeAliases: ["/calendar"],
-      },
-    ],
-  },
-  {
-    label: "Copilot",
-    showContextTabs: true,
-    pages: [
-      { label: "Assistant", to: "/copilot" },
-      { label: "Email Drafts", to: "/email-drafts" },
-    ],
-  },
-  {
-    label: "Settings",
-    showContextTabs: true,
-    pages: [
-      { label: "Connections", to: "/integrations" },
-      { label: "Privacy", to: "/privacy" },
-    ],
-  },
+  { label: "Dashboard", showContextTabs: false, pages: [{ label: "Dashboard", to: "/" }] },
+  { label: "Workspace", showContextTabs: false, pages: [
+    { label: "Workspace", to: "/workspace/sources", routeAliases: ["/workspace", "/source-inbox", "/gmail", "/emails", "/calendar-sources", "/documents", "/knowledge", "/actions", "/calendar", "/email-drafts"] },
+  ] },
 ] as const satisfies readonly WorkspaceNavGroup[];
 
 function routeRootMatches(pathname: string, routeRoot: string): boolean {

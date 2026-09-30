@@ -16,7 +16,9 @@
 //
 // Loading / empty / error states reuse the shared feedback components.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { peekCache } from "@/api/cache";
+import { useQueryRefresh } from "@/hooks/useQueryRefresh";
 import { useSearchParams } from "react-router-dom";
 import { ApiError, integrationsApi } from "@/api";
 import type { IntegrationConnection, IntegrationService } from "@/api";
@@ -198,9 +200,10 @@ function ServiceCard({
   );
 }
 
-export default function IntegrationsPage() {
-  const [connections, setConnections] = useState<IntegrationConnection[]>([]);
-  const [loading, setLoading] = useState(true);
+export default function IntegrationsPage({ embedded = false }: { embedded?: boolean }) {
+  const [connections, setConnections] = useState<IntegrationConnection[]>(() => peekCache<IntegrationConnection[]>("/integrations") ?? []);
+  const [loading, setLoading] = useState(() => !peekCache("/integrations"));
+  const loaded = useRef(!!peekCache("/integrations"));
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyService, setBusyService] = useState<string | null>(null);
@@ -210,12 +213,12 @@ export default function IntegrationsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const connected = searchParams.get("connected");
   const callbackError = searchParams.get("error");
-  const notice = connected
+  const [notice] = useState(connected
     ? `${SERVICE_LABELS[connected] ?? connected} connected.`
-    : null;
-  const banner = callbackError
+    : null);
+  const [banner] = useState(callbackError
     ? "Could not connect that service. Please try again."
-    : null;
+    : null);
 
   // Clear the one-time callback params from the URL after reading them so a
   // refresh doesn't re-show the banner.
@@ -230,17 +233,20 @@ export default function IntegrationsPage() {
   }, [connected, callbackError, searchParams, setSearchParams]);
 
   const load = useCallback(async () => {
-    setLoading(true);
+    setLoading(!loaded.current);
     setError(null);
     try {
       const result = await integrationsApi.list();
       setConnections(result);
+      loaded.current = true;
     } catch {
       setError("Could not load your integrations. Please retry.");
     } finally {
       setLoading(false);
     }
   }, []);
+
+  useQueryRefresh("/integrations", load);
 
   useEffect(() => {
     void load();
@@ -308,9 +314,9 @@ export default function IntegrationsPage() {
   );
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-8">
+    <div className={embedded ? "" : "mx-auto max-w-3xl px-6 py-8"}>
       <header className="mb-6">
-        <h1 className="text-xl font-semibold text-slate-900">Integrations</h1>
+        <h2 className="text-lg font-semibold text-slate-900">Connections</h2>
         <p className="mt-1 text-sm text-slate-500">
           Connect Google services to bring email and calendar into your
           workspace. You control what the platform can access, and you can

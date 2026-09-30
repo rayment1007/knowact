@@ -13,6 +13,8 @@
 // Loading / empty / error states reuse the shared feedback components.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { peekCache } from "@/api/cache";
+import { useQueryRefresh } from "@/hooks/useQueryRefresh";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ApiError, documentsApi, getErrorMessage } from "@/api";
 import type { DocumentAsset, DocumentProcessingStatus, Sensitivity } from "@/api";
@@ -133,8 +135,9 @@ function UploadForm({ disabled, onUpload }: UploadFormProps) {
 export default function DocumentsPage() {
   const { documentId } = useParams<{ documentId: string }>();
   const navigate = useNavigate();
-  const [documents, setDocuments] = useState<DocumentAsset[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [documents, setDocuments] = useState<DocumentAsset[]>(() => peekCache<DocumentAsset[]>("/documents") ?? []);
+  const [loading, setLoading] = useState(() => !peekCache("/documents"));
+  const loaded = useRef(!!peekCache("/documents"));
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -184,12 +187,13 @@ export default function DocumentsPage() {
 
   const load = useCallback(async () => {
     const requestGeneration = ++listRequestGeneration.current;
-    setLoading(true);
+    setLoading(!loaded.current);
     setError(null);
     try {
       const result = await documentsApi.list();
       if (requestGeneration !== listRequestGeneration.current) return;
       setDocuments(result);
+      loaded.current = true;
     } catch {
       if (requestGeneration !== listRequestGeneration.current) return;
       setError("Could not load your documents. Please retry.");
@@ -199,6 +203,8 @@ export default function DocumentsPage() {
       }
     }
   }, []);
+
+  useQueryRefresh("/documents", () => { void load(); if (documentId) void loadOpenedDocument(); });
 
   useEffect(() => {
     void load();

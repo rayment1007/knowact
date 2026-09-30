@@ -118,6 +118,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     register_routers(app)
+    from app.modules.cwi.routers import workspace, workspace_browser, source_proposals
+    app.include_router(workspace.router, prefix="/api")
+    app.include_router(workspace_browser.router, prefix="/api")
+    app.include_router(source_proposals.router, prefix="/api")
 
     return app
 

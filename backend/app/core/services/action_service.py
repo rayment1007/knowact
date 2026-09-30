@@ -23,9 +23,8 @@ design's rule that *every* memory-mutating change writes exactly one
 13.1) — **both** AI-originated and manual creations record a single
 ``CREATE_ACTION`` audit row. Requirement 8.1 makes this explicit for the
 confirmed-suggestion path; applying it uniformly to manual creation keeps the
-audit trail complete and consistent. Pure status/field updates are not
-enumerated as audited actions in the design (there is no ``UPDATE_ACTION`` action
-type), so :meth:`update` does not write an audit row.
+audit trail complete and consistent. Changed status/field updates record one
+``UPDATE_ACTION`` row for the workspace activity feed; no-op updates add none.
 """
 
 from __future__ import annotations
@@ -316,9 +315,8 @@ class ActionService:
         Resolves the org-scoped action (``404`` if missing/cross-tenant) and
         applies only the fields explicitly provided in ``payload`` (unset fields
         are left untouched), so a client can, e.g., mark an action ``DONE``
-        without disturbing its other fields (Requirements 8.3, 8.4). No audit row
-        is written for a status/field update — the design enumerates no
-        ``UPDATE_ACTION`` audit type.
+        without disturbing its other fields (Requirements 8.3, 8.4). A changed
+        value records one ``UPDATE_ACTION`` row in the same transaction.
 
         Args:
             org_id: The tenant the action must belong to.
@@ -335,12 +333,16 @@ class ActionService:
 
         action = self._get_action(org_id, action_id)
 
-        changes = payload.model_dump(exclude_unset=True)
+        changes = {field: value for field, value in payload.model_dump(exclude_unset=True).items()
+            if getattr(action, field) != value}
         for field, value in changes.items():
             setattr(action, field, value)
 
         self.db.add(action)
         self.db.flush()
+        if changes:
+            self.audit.record(org_id=org_id, actor_id=actor_id, action_type="UPDATE_ACTION",
+                target_type="ActionItem", target_id=action.id, detail={"fields": sorted(changes)})
         return action
 
     def update_status(

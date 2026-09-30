@@ -312,6 +312,9 @@ class DocumentService:
 
         asset = self._get_asset(org_id, user_id, document_asset_id)
 
+        from app.modules.cwi.services.source_proposal_service import discard_unapproved
+        discard_unapproved(self.db, org_id, "file", [asset.id])
+
         # Cascade chunk deletion explicitly with a bulk DELETE (portable across
         # SQLite/PG, and avoids per-row identity-map races with the FK cascade).
         self.db.execute(

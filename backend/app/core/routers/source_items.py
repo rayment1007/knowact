@@ -78,6 +78,7 @@ router = APIRouter(prefix="/source-items", tags=["source-items"])
 def list_source_items(
     status: SourceStatus | None = None,
     category: BusinessCategory | None = None,
+    review_pending: bool = False,
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
     _user: User = Depends(get_current_user),
@@ -89,8 +90,8 @@ def list_source_items(
     narrowed by ``status`` and ``category`` query parameters.
     """
 
-    filters = InboxFilter(status=status, business_category=category)
-    items = IngestionService(db).list_inbox(organization_id, filters)
+    filters = InboxFilter(status=status, business_category=category, review_pending=review_pending)
+    items = IngestionService(db).list_inbox(organization_id, filters, review_user_id=_user.id)
     return [SourceItemResponse.model_validate(item) for item in items]
 
 

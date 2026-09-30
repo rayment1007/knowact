@@ -19,6 +19,7 @@ login (:mod:`app.core.routers.auth`) is untouched (Requirement 23.5).
 from __future__ import annotations
 
 import secrets
+import logging
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -46,6 +47,7 @@ from app.security import (
 )
 
 router = APIRouter(prefix="/auth/google", tags=["auth-google"])
+logger = logging.getLogger(__name__)
 
 # ``purpose`` claim distinguishing a sign-in state from an integration-authz
 # state so neither can be replayed as the other.
@@ -202,18 +204,34 @@ def google_signin_callback(
 
     state_nonce = _decode_signin_state(settings, state)
     cookie_nonce = request.cookies.get(_SIGNIN_STATE_COOKIE)
-    if (
-        state_nonce is None
-        or cookie_nonce is None
-        or not secrets.compare_digest(state_nonce, cookie_nonce)
-    ):
+    if state_nonce is None:
+        logger.warning("Google sign-in failed: invalid_or_expired_state")
+        return _signin_failure(settings)
+    if cookie_nonce is None:
+        logger.warning("Google sign-in failed: missing_state_cookie")
+        return _signin_failure(settings)
+    if not secrets.compare_digest(state_nonce, cookie_nonce):
+        logger.warning("Google sign-in failed: state_cookie_mismatch")
         return _signin_failure(settings)
 
     try:
         identity = oauth.exchange_signin_code(
             code=code, redirect_uri=_signin_redirect_uri(settings)
         )
-    except GoogleOAuthError:
+    except GoogleOAuthError as exc:
+        # Never log exception text, URLs, response bodies, codes or tokens.
+        cause = exc.__cause__
+        response = getattr(cause, "response", None)
+        provider_error = "unknown"
+        if response is not None:
+            try:
+                value = response.json().get("error")
+                if value in ("invalid_client", "invalid_grant", "redirect_uri_mismatch", "access_denied"):
+                    provider_error = value
+            except (ValueError, AttributeError, TypeError):
+                pass
+        logger.warning("Google sign-in failed: google_exchange cause=%s http_status=%s provider_error=%s",
+            type(cause).__name__ if cause else "verification", getattr(response, "status_code", None), provider_error)
         return _signin_failure(settings)
 
     if (
@@ -221,6 +239,7 @@ def google_signin_callback(
         or not identity.email_verified
         or not settings.is_auth_email_allowed(identity.email)
     ):
+        logger.warning("Google sign-in failed: identity_not_verified_or_not_allowed")
         return _signin_failure(settings)
 
     user = _upsert_google_user(db, identity)

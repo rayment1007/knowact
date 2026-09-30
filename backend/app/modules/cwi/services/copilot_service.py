@@ -36,12 +36,13 @@ Security / grounding invariants (Requirements 30.1, 30.2, 30.7, 31.2-31.5):
 from __future__ import annotations
 
 import enum
+import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, time, timedelta, timezone
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
@@ -66,8 +67,7 @@ from app.core.services.action_service import ActionService
 from app.core.services.audit_service import AuditService
 from app.dependencies import call_with_fallback, scope_select
 from app.modules.cwi.models import (
-    CalendarEventLink,
-    CalendarSyncStatus,
+    CalendarSource,
     CopilotAnswerLog,
     EmailMessageRecord,
     IntegrationConnection,
@@ -128,7 +128,7 @@ SOURCE_CALENDAR = "CALENDAR"
 
 #: The standard, honest message returned when evidence is insufficient.
 INSUFFICIENT_EVIDENCE_MESSAGE = (
-    "I can't find enough confirmed evidence in your organization's data to "
+    "I can't find enough confirmed evidence in your workspace to "
     "answer that. Try confirming related knowledge, or ask about something "
     "already captured."
 )
@@ -173,6 +173,10 @@ class _Evidence:
     evidence_excerpt: str
     timestamp: datetime | None
     deep_link: str
+    status: str | None = None
+    due_date: date | None = None
+    starts_at: str | None = None
+    ends_at: str | None = None
 
     def to_provider_item(self) -> CopilotEvidenceItem:
         return CopilotEvidenceItem(
@@ -181,6 +185,8 @@ class _Evidence:
             title=self.title,
             excerpt=self.evidence_excerpt,
             timestamp=self.timestamp,
+            status=self.status, due_date=self.due_date,
+            starts_at=self.starts_at, ends_at=self.ends_at,
         )
 
 
@@ -191,6 +197,14 @@ def _excerpt(text: str | None) -> str:
     if len(clean) <= _EXCERPT_MAX:
         return clean
     return clean[: _EXCERPT_MAX - 1].rstrip() + "\u2026"
+
+
+def _answer_references(answer, citations):
+    if not answer:
+        return answer
+    numbers = {str(c.source_id): str(index + 1) for index, c in enumerate(citations)}
+    pattern = r"\(?(?:id\s*[:=]\s*)?([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\)?"
+    return re.sub(pattern, lambda match: f"[{numbers[match.group(1).lower()]}]" if match.group(1).lower() in numbers else "[unverified source]", answer, flags=re.I)
 
 
 class CopilotService:
@@ -334,8 +348,8 @@ class CopilotService:
         self._assert_ask_tool("list_open_actions")
         stmt = (
             scope_select(select(ActionItem), ActionItem, org_id)
-            .where(ActionItem.status == ActionStatus.OPEN)
-            .order_by(ActionItem.created_at.desc(), ActionItem.id.desc())
+            .where(ActionItem.status.in_([ActionStatus.OPEN, ActionStatus.IN_PROGRESS]))
+            .order_by(ActionItem.due_date.asc().nulls_last(), ActionItem.created_at.desc(), ActionItem.id.desc())
             .limit(_MAX_PER_CATEGORY)
         )
         rows = self.db.execute(stmt).scalars().all()
@@ -344,9 +358,10 @@ class CopilotService:
                 source_type=SOURCE_ACTION,
                 source_id=row.id,
                 title=_excerpt(row.title)[:120] or "Action",
-                evidence_excerpt=_excerpt(row.evidence_text or row.title),
+                evidence_excerpt=_excerpt(row.description or row.evidence_text or row.title),
                 timestamp=row.created_at,
                 deep_link=f"/actions/{row.id}",
+                status=getattr(row.status, "value", row.status), due_date=row.due_date,
             )
             for row in rows
         ]
@@ -413,48 +428,97 @@ class CopilotService:
             )
         return evidence
 
-    def _get_upcoming_calendar_events(
-        self, org_id: UUID, user_id: UUID
-    ) -> list[_Evidence]:
+    def _calendar_evidence(self, org_id, user_id, now, today_only=False):
         self._assert_ask_tool("get_upcoming_calendar_events")
-        stmt = (
-            scope_select(select(CalendarEventLink), CalendarEventLink, org_id)
-            .where(CalendarEventLink.user_id == user_id)
-            .where(
-                CalendarEventLink.sync_status.in_(
-                    (
-                        CalendarSyncStatus.PENDING,
-                        CalendarSyncStatus.SYNCED,
-                        CalendarSyncStatus.UPDATE_PENDING,
-                    )
-                )
-            )
-            .order_by(
-                CalendarEventLink.created_at.desc(), CalendarEventLink.id.desc()
-            )
-            .limit(_MAX_PER_CATEGORY)
-        )
-        rows = self.db.execute(stmt).scalars().all()
-        evidence: list[_Evidence] = []
+        today = now.date()
+        earliest = (today - timedelta(days=1)).isoformat()
+        stmt = select(CalendarSource).join(IntegrationConnection).where(
+            CalendarSource.organization_id == org_id, IntegrationConnection.organization_id == org_id,
+            IntegrationConnection.user_id == user_id, CalendarSource.starts_at != "",
+            (CalendarSource.ends_at >= earliest) | (CalendarSource.starts_at >= earliest))
+        if today_only:
+            stmt = stmt.where(CalendarSource.starts_at < (today + timedelta(days=2)).isoformat())
+        rows = self.db.scalars(stmt.order_by(CalendarSource.starts_at, CalendarSource.id).limit(50))
+        evidence = []
         for row in rows:
-            title = "Calendar event"
-            excerpt = f"Calendar event on {row.google_calendar_id}."
-            if row.action_item_id is not None:
-                action = self.db.get(ActionItem, row.action_item_id)
-                if action is not None and action.organization_id == org_id:
-                    title = _excerpt(action.title)[:120] or title
-                    excerpt = _excerpt(f"Scheduled: {action.title}")
-            evidence.append(
-                _Evidence(
-                    source_type=SOURCE_CALENDAR,
-                    source_id=row.id,
-                    title=title,
-                    evidence_excerpt=excerpt,
-                    timestamp=row.last_synced_at or row.created_at,
-                    deep_link=f"/calendar/{row.id}",
-                )
-            )
+            try:
+                start = datetime.fromisoformat(row.starts_at.replace("Z", "+00:00"))
+                end = datetime.fromisoformat(row.ends_at.replace("Z", "+00:00")) if row.ends_at else start
+                start = start.replace(tzinfo=now.tzinfo) if start.tzinfo is None else start.astimezone(now.tzinfo)
+                end = end.replace(tzinfo=now.tzinfo) if end.tzinfo is None else end.astimezone(now.tzinfo)
+            except ValueError:
+                continue
+            if today_only:
+                lower = datetime.combine(today, time.min, tzinfo=now.tzinfo)
+                upper = lower + timedelta(days=1)
+                if start >= upper or (end <= lower if end > start else start < lower):
+                    continue
+            elif (end if end > start else start) < now:
+                continue
+            evidence.append(_Evidence(source_type=SOURCE_CALENDAR, source_id=row.id,
+                title=row.title, evidence_excerpt=_excerpt(row.description or row.title), timestamp=row.updated_at,
+                deep_link=f"/workspace/sources?item=calendar:{row.id}", starts_at=row.starts_at, ends_at=row.ends_at))
+            if len(evidence) >= _MAX_PER_CATEGORY:
+                break
         return evidence
+
+    def _get_upcoming_calendar_events(self, org_id: UUID, user_id: UUID) -> list[_Evidence]:
+        # Read the captured event times, not the time an action-to-calendar link
+        # happened to be created. Link timestamps are not event schedules.
+        return self._calendar_evidence(org_id, user_id, getattr(self, "request_now", datetime.now(timezone.utc)))
+
+    def _daily_attention(self, org_id, user_id, question, now):
+        """Answer supported date-list queries directly; an LLM cannot invent urgency."""
+        from app.modules.cwi.schemas import Citation, CopilotResponse
+        normalized = " ".join(question.lower().strip(" ?!.？。！").split())
+        daily = normalized in {"what needs my attention today", "what need my attention today",
+            "what should i focus on today", "what do i need to do today", "what are my tasks for today",
+            "今天有什么需要关注", "今天有什么任务", "今天需要做什么", "今天需要注意什么"}
+        overdue_only = normalized in {"show my overdue tasks", "what are my overdue tasks", "显示逾期任务"}
+        if not daily and not overdue_only:
+            return None
+        today = now.date()
+        base = select(ActionItem).where(ActionItem.organization_id == org_id,
+            ActionItem.status.in_([ActionStatus.OPEN, ActionStatus.IN_PROGRESS]))
+        lines = [f"As of {today.strftime('%d %b %Y')} (UTC{now.strftime('%z')[:3]}:{now.strftime('%z')[3:]}), based on saved workspace data:"]
+        evidence = []
+        for label, condition in [("Overdue tasks", ActionItem.due_date < today), ("Due today", ActionItem.due_date == today)]:
+            if overdue_only and label == "Due today":
+                continue
+            query = base.where(condition)
+            total = self.db.scalar(select(func.count()).select_from(query.subquery())) or 0
+            lines.append(f"\n{label}: {total}")
+            for row in self.db.scalars(query.order_by(ActionItem.due_date, ActionItem.id).limit(5)):
+                evidence.append(_Evidence(SOURCE_ACTION, row.id, row.title,
+                    _excerpt(row.description or row.evidence_text or row.title), row.created_at, f"/actions/{row.id}",
+                    status=getattr(row.status, "value", row.status), due_date=row.due_date))
+                lines.append(f"- {row.title} — due {row.due_date.strftime('%d %b %Y')} [{len(evidence)}]")
+            if total > 5:
+                lines.append("Showing the first 5; open Actions for the rest.")
+        if daily:
+            undated = self.db.scalar(select(func.count()).select_from(base.where(ActionItem.due_date.is_(None)).subquery())) or 0
+            if undated:
+                lines.append(f"\n{undated} unfinished action(s) have no due date; they are not automatically due today.")
+            events = self._calendar_evidence(org_id, user_id, now, today_only=True)
+            lines.append("\nCalendar today (up to 5 captured events):")
+            for event in events:
+                evidence.append(event)
+                start = datetime.fromisoformat(event.starts_at.replace("Z", "+00:00"))
+                if len(event.starts_at) == 10:
+                    label = "All day"
+                else:
+                    start = start.replace(tzinfo=now.tzinfo) if start.tzinfo is None else start.astimezone(now.tzinfo)
+                    label = start.strftime("%d %b, %H:%M")
+                lines.append(f"- {event.title} — {label} [{len(evidence)}]")
+            if not events:
+                lines.append("No events for today found in the checked calendar snapshots.")
+            lines.append("\nOld email reminders are not assumed to be due today. Check Sources for unreviewed requests. Sync to include newer provider data.")
+        response = CopilotResponse(answer="\n".join(lines), citations=[Citation(source_type=e.source_type,
+            source_id=e.source_id, title=e.title, evidence_excerpt=e.evidence_excerpt,
+            timestamp=e.timestamp, deep_link=e.deep_link) for e in evidence],
+            insufficient_evidence=False, suggested_artifact=None, intent="ASK")
+        self._log_answer(org_id, user_id, question, response, evidence)
+        return response
 
     # -- Evidence assembly --------------------------------------------------
 
@@ -513,6 +577,11 @@ class CopilotService:
         intent = self._determine_intent(req.question, getattr(req, "intent", None))
         business_entity_id = getattr(req, "business_entity_id", None)
 
+        self.request_now = datetime.now(timezone(timedelta(minutes=getattr(req, "utc_offset_minutes", 0))))
+        if intent == CopilotIntent.ASK:
+            daily_response = self._daily_attention(org_id, user_id, req.question, self.request_now)
+            if daily_response is not None:
+                return daily_response
         evidence = self._gather_evidence(
             org_id, user_id, req.question, business_entity_id
         )
@@ -536,6 +605,7 @@ class CopilotService:
             question=req.question,
             intent=intent.value,
             evidence=[e.to_provider_item() for e in evidence],
+            current_datetime=self.request_now,
         )
 
         def _run(provider: AIProvider) -> CopilotAnswerOutput:
@@ -564,7 +634,7 @@ class CopilotService:
                 )
             )
 
-        if output.insufficient_evidence:
+        if output.insufficient_evidence or not citations:
             response = CopilotResponse(
                 answer=INSUFFICIENT_EVIDENCE_MESSAGE,
                 citations=[],
@@ -576,7 +646,7 @@ class CopilotService:
             return response
 
         suggested_artifact: SuggestedArtifact | None = None
-        answer: str | None = output.answer
+        answer: str | None = _answer_references(output.answer, citations)
         if intent in (CopilotIntent.DRAFT, CopilotIntent.ACT) and (
             output.proposed_artifact is not None
         ):
@@ -585,8 +655,8 @@ class CopilotService:
                 status="SUGGESTED",
                 tier=intent.value,
                 kind=artifact.kind,
-                title=artifact.title,
-                body=artifact.body,
+                title=_answer_references(artifact.title, citations),
+                body=_answer_references(artifact.body, citations),
                 details=dict(artifact.details or {}),
             )
             # A SUGGESTED artifact replaces a prose answer (design pipeline).

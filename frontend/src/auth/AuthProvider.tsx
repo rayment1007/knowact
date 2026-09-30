@@ -23,6 +23,7 @@ import {
 } from "@/api";
 import type { LoginRequest, Organization, User } from "@/api";
 import { AuthContext } from "./AuthContext";
+import { clearApiCache } from "@/api/cache";
 import type { AuthContextValue, AuthStatus } from "./AuthContext";
 
 interface SessionState {
@@ -55,7 +56,7 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
 
   // React to global 401s: drop the session so ProtectedRoute redirects.
   useEffect(() => {
-    const handleUnauthorized = () => setSession(UNAUTHENTICATED);
+    const handleUnauthorized = () => { clearApiCache(); setSession(UNAUTHENTICATED); };
     setUnauthorizedHandler(handleUnauthorized);
     return () => setUnauthorizedHandler(null);
   }, []);
@@ -67,6 +68,7 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
 
     async function restore() {
+      clearApiCache();
       setSession(LOADING);
       try {
         const me = await authApi.getCurrentUser();
@@ -104,6 +106,7 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
     // the authenticated user. Load the organization from /me to complete the
     // session. A 401 here (bad credentials) propagates to the caller.
     await authApi.login(credentials);
+    clearApiCache();
     try {
       const me = await authApi.getCurrentUser();
       setSession({
@@ -124,12 +127,14 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     try {
       await authApi.logout();
+      clearApiCache();
       setSession(UNAUTHENTICATED);
     } catch (error) {
       // An expired session is already logged out. For network/5xx failures the
       // HTTP-only cookie may still be valid, so retain local state and let the
       // caller show a retryable error instead of claiming logout succeeded.
       if (error instanceof ApiError && error.status === 401) {
+        clearApiCache();
         setSession(UNAUTHENTICATED);
         return;
       }

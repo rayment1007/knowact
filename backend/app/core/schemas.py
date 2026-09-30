@@ -140,6 +140,7 @@ class InboxFilter(BaseModel):
 
     status: SourceStatus | None = None
     business_category: BusinessCategory | None = None
+    review_pending: bool = False
 
 
 class SourceItemResponse(BaseModel):

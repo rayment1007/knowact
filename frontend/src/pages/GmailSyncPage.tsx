@@ -17,6 +17,8 @@
 // feedback components; suggestions reuse the shared SuggestionCard.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { peekCache } from "@/api/cache";
+import { useQueryRefresh } from "@/hooks/useQueryRefresh";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ApiError, gmailApi, integrationsApi } from "@/api";
 import type {
@@ -78,6 +80,7 @@ function EmailMessageCard({ record, busy, onDelete }: EmailMessageCardProps) {
           <p className="mt-1 truncate text-xs text-slate-400">
             To {record.recipients.join(", ") || "unknown recipient"}
           </p>
+          {record.source_item_id && <Link to={`/source-inbox/${record.source_item_id}`} className="mt-2 inline-block text-xs font-medium text-blue-600">Read captured email →</Link>}
         </div>
         <div className="flex shrink-0 flex-col items-end gap-2">
           <div className="flex flex-wrap justify-end gap-1">
@@ -367,13 +370,14 @@ function SuggestionItem({
 export default function GmailSyncPage() {
   const { emailId } = useParams<{ emailId: string }>();
   const navigate = useNavigate();
-  const [connections, setConnections] = useState<IntegrationConnection[]>([]);
+  const [connections, setConnections] = useState<IntegrationConnection[]>(() => peekCache<IntegrationConnection[]>("/integrations") ?? []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<EmailMessageRecord[]>([]);
-  const [suggestions, setSuggestions] = useState<EmailTaskSuggestion[]>([]);
+  const [messages, setMessages] = useState<EmailMessageRecord[]>(() => peekCache<EmailMessageRecord[]>("/gmail/messages") ?? []);
+  const [suggestions, setSuggestions] = useState<EmailTaskSuggestion[]>(() => peekCache<EmailTaskSuggestion[]>("/gmail/suggestions") ?? []);
   const [lastRun, setLastRun] = useState<SyncRun | null>(null);
 
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !peekCache("/integrations"));
+  const loaded = useRef(!!peekCache("/integrations"));
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -435,12 +439,13 @@ export default function GmailSyncPage() {
 
   const loadConnections = useCallback(async () => {
     const requestGeneration = ++connectionsRequestGeneration.current;
-    setLoading(true);
+    setLoading(!loaded.current);
     setError(null);
     try {
       const result = await integrationsApi.list();
       if (requestGeneration !== connectionsRequestGeneration.current) return;
       setConnections(result);
+      loaded.current = true;
       const firstGmail = result.find(
         (connection) =>
           connection.service === "GMAIL" && connection.status === "CONNECTED",
@@ -458,6 +463,7 @@ export default function GmailSyncPage() {
 
   const loadIngested = useCallback(async () => {
     const requestGeneration = ++ingestedRequestGeneration.current;
+    setActionError(null);
     try {
       const [msgs, sugg] = await Promise.all([
         gmailApi.listMessages(),
@@ -485,6 +491,10 @@ export default function GmailSyncPage() {
       ingestedRequestGeneration.current += 1;
     };
   }, [loadIngested]);
+
+  useQueryRefresh("/integrations", loadConnections);
+  useQueryRefresh("/gmail", loadIngested);
+  useQueryRefresh(`/gmail/messages/${emailId}`, () => { if (emailId) void loadOpenedMessage(); });
 
   const handleInitialSync = useCallback(
     async (options: InitialSyncOptions) => {
@@ -624,7 +634,7 @@ export default function GmailSyncPage() {
         <EmptyState
           variant="plain"
           title="No connected Gmail account."
-          description="Connect Gmail on the Integrations page, then return here to sync."
+          description="Connect Gmail in Settings. Connected accounts sync automatically when you sign in."
         />
       ) : (
         <div className="space-y-6">
@@ -780,7 +790,7 @@ export default function GmailSyncPage() {
               <EmptyState
                 variant="plain"
                 title="No ingested email yet."
-                description="Configure and start an initial sync above."
+                description="Use Sync Latest to capture the latest messages from your connected account."
               />
             ) : (
               <ul className="space-y-2">

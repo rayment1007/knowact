@@ -102,6 +102,38 @@ def test_callback_invalid_state_redirects_no_session(client: TestClient) -> None
     assert client.get("/api/auth/me").status_code == 401
 
 
+def test_callback_logs_missing_cookie_without_logging_state(client, caplog):
+    _override(client, FakeGoogleOAuthClient())
+    state = client.get("/api/auth/google/start").json()["state"]
+    client.cookies.clear()
+    response = client.get("/api/auth/google/callback", params={"code": "private-code", "state": state}, follow_redirects=False)
+    assert response.status_code == 302
+    messages = "\n".join(record.getMessage() for record in caplog.records if record.name.endswith("routers.google_auth"))
+    assert "missing_state_cookie" in messages
+    assert state not in messages and "private-code" not in messages
+
+
+def test_callback_logs_safe_exchange_category_without_exception_payload(client, caplog, monkeypatch):
+    import httpx
+    from app.modules.cwi.services.google_oauth import GoogleOAuthError
+    fake = FakeGoogleOAuthClient()
+    def fail(**kwargs):
+        request = httpx.Request("POST", "https://oauth2.googleapis.com/token")
+        response = httpx.Response(400, request=request, json={"error": "invalid_grant", "error_description": "private-provider-detail"})
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as cause:
+            raise GoogleOAuthError("private-exception-detail") from cause
+    monkeypatch.setattr(fake, "exchange_signin_code", fail)
+    _override(client, fake)
+    state = client.get("/api/auth/google/start").json()["state"]
+    response = client.get("/api/auth/google/callback", params={"code": "private-code", "state": state}, follow_redirects=False)
+    assert response.status_code == 302
+    messages = "\n".join(record.getMessage() for record in caplog.records if record.name.endswith("routers.google_auth"))
+    assert "http_status=400 provider_error=invalid_grant" in messages
+    assert "private-" not in messages and state not in messages
+
+
 def test_signin_creates_no_integration_connection(
     client: TestClient, seeded_user: dict[str, Any], db_session: Any
 ) -> None:

@@ -21,7 +21,7 @@ export const copilotApi = {
    * artifact (DRAFT/ACT). No mutation occurs here (Requirement 31.3).
    */
   ask: (payload: CopilotAskRequest) =>
-    api.post<CopilotResponse>("/copilot/ask", payload),
+    api.post<CopilotResponse>("/copilot/ask", { ...payload, utc_offset_minutes: -new Date().getTimezoneOffset() }),
 
   /** The fixed + dynamic, org-scoped suggested questions (Requirement 30.6). */
   suggestedQuestions: () =>

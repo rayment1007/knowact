@@ -1,3 +1,4 @@
+import { KnowledgeOrigin } from "@/components/workspace/SourceProposal";
 // KnowledgeHubPage: the review surface of the knowledge base (Requirement 7).
 //
 // Responsibilities:
@@ -16,6 +17,8 @@
 // output.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { peekCache } from "@/api/cache";
+import { useQueryRefresh } from "@/hooks/useQueryRefresh";
 import {
   Link,
   useNavigate,
@@ -137,14 +140,15 @@ interface KnowledgeDetailPanelProps {
   onDeleted: (knowledgeId: string) => void;
 }
 
-function KnowledgeDetailPanel({
+export function KnowledgeDetailPanel({
   knowledgeId,
   entityNameById,
   onStatusChanged,
   onDeleted,
 }: KnowledgeDetailPanelProps) {
-  const [detail, setDetail] = useState<KnowledgeDetail | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [detail, setDetail] = useState<KnowledgeDetail | null>(() => peekCache<KnowledgeDetail>(`/knowledge/${knowledgeId}`) ?? null);
+  const [loading, setLoading] = useState(() => !peekCache(`/knowledge/${knowledgeId}`));
+  const loadedId = useRef(peekCache(`/knowledge/${knowledgeId}`) ? knowledgeId : null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -152,12 +156,13 @@ function KnowledgeDetailPanel({
 
   const loadDetail = useCallback(async () => {
     const requestGeneration = ++detailRequestGeneration.current;
-    setLoading(true);
+    setLoading(loadedId.current !== knowledgeId);
     setError(null);
     try {
       const result = await knowledgeApi.getDetail(knowledgeId);
       if (requestGeneration !== detailRequestGeneration.current) return;
       setDetail(result);
+      loadedId.current = knowledgeId;
     } catch (err) {
       if (requestGeneration !== detailRequestGeneration.current) return;
       if (err instanceof ApiError && err.status === 404) {
@@ -171,6 +176,8 @@ function KnowledgeDetailPanel({
       }
     }
   }, [knowledgeId]);
+
+  useQueryRefresh(`/knowledge/${knowledgeId}`, loadDetail);
 
   useEffect(() => {
     void loadDetail();
@@ -214,7 +221,7 @@ function KnowledgeDetailPanel({
 
   if (!detail) return null;
 
-  const { knowledge_item: item, linked_actions, linked_decisions } = detail;
+  const { knowledge_item: item, linked_actions } = detail;
   const isSuggested = item.status === "SUGGESTED";
   const entityName = item.business_entity_id
     ? entityNameById.get(item.business_entity_id) ?? "Unknown entity"
@@ -275,6 +282,8 @@ function KnowledgeDetailPanel({
       </SuggestionCard>
 
       {actionError ? <ErrorState message={actionError} variant="alert" /> : null}
+
+      <KnowledgeOrigin id={item.id} />
 
       <div className="flex justify-end">
         <button
@@ -340,49 +349,6 @@ function KnowledgeDetailPanel({
         )}
       </section>
 
-      {/* Linked decisions (Req 7.4) */}
-      <section>
-        <h3 className="text-sm font-semibold text-slate-900">
-          Linked decisions
-          <span className="ml-1 text-xs font-normal text-slate-400">
-            ({linked_decisions.length})
-          </span>
-        </h3>
-        {linked_decisions.length === 0 ? (
-          <p className="mt-1 text-sm text-slate-500">
-            No decisions are linked to this knowledge item.
-          </p>
-        ) : (
-          <ul className="mt-2 space-y-2">
-            {linked_decisions.map((decision) => (
-              <li
-                key={decision.id}
-                className="rounded-lg border border-slate-200 bg-white p-3"
-              >
-                <Link
-                  to={`/decisions/${decision.id}`}
-                  className="text-sm font-medium text-slate-900 hover:text-brand-700"
-                >
-                  {decision.title}
-                </Link>
-                <p className="mt-1 text-sm text-slate-700">
-                  {decision.decision}
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  {decision.rationale}
-                </p>
-                <div className="mt-1 text-xs text-slate-400">
-                  Decided {formatDate(decision.decided_at)}
-                </div>
-                <EvidenceBadge
-                  text={decision.evidence_text}
-                  className="mt-2"
-                />
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
     </div>
   );
 }
@@ -395,15 +361,25 @@ export default function KnowledgeHubPage() {
   const { knowledgeId } = useParams<{ knowledgeId: string }>();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [items, setItems] = useState<KnowledgeItem[]>([]);
+  const initialQuery = new URLSearchParams();
+  for (const key of ["business_entity_id", "status"]) if (searchParams.get(key)) initialQuery.set(key, searchParams.get(key)!);
+  const cachedItems = peekCache<KnowledgeItem[]>(`/knowledge${initialQuery.size ? `?${initialQuery}` : ""}`);
+  const [items, setItems] = useState<KnowledgeItem[]>(cachedItems ?? []);
   const [entities, setEntities] = useState<BusinessEntity[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!cachedItems);
+  const loaded = useRef(!!cachedItems);
   const [error, setError] = useState<string | null>(null);
   const listRequestGeneration = useRef(0);
 
   const businessEntityQuery = searchParams.get("business_entity_id") ?? "";
   const [entityFilter, setEntityFilter] = useState<string>(businessEntityQuery);
-  const [statusFilter, setStatusFilter] = useState<SuggestionStatus | "">("");
+  const statusQuery = searchParams.get("status") ?? "";
+  const statusFilter: SuggestionStatus | "" = ["SUGGESTED", "CONFIRMED", "REJECTED"].includes(statusQuery) ? statusQuery as SuggestionStatus : "";
+  const setStatusFilter = (value: SuggestionStatus | "") => {
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set("status", value); else next.delete("status");
+    setSearchParams(next, { replace: true });
+  };
   const selectedId = knowledgeId ?? null;
 
   useEffect(() => {
@@ -443,12 +419,13 @@ export default function KnowledgeHubPage() {
 
   const loadItems = useCallback(async () => {
     const requestGeneration = ++listRequestGeneration.current;
-    setLoading(true);
+    setLoading(!loaded.current);
     setError(null);
     try {
       const result = await knowledgeApi.list(filters);
       if (requestGeneration !== listRequestGeneration.current) return;
       setItems(result);
+      loaded.current = true;
     } catch {
       if (requestGeneration !== listRequestGeneration.current) return;
       setError("Could not load the knowledge base. Please retry.");
@@ -458,6 +435,8 @@ export default function KnowledgeHubPage() {
       }
     }
   }, [filters]);
+
+  useQueryRefresh("/knowledge", loadItems);
 
   useEffect(() => {
     void loadItems();
@@ -613,7 +592,7 @@ export default function KnowledgeHubPage() {
           ) : (
             <div className="flex h-full min-h-[16rem] items-center justify-center p-6 text-center text-sm text-slate-500">
               Select a knowledge item to see its summary, key points, evidence,
-              and linked actions and decisions.
+              and linked actions.
             </div>
           )}
         </div>

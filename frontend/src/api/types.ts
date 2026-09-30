@@ -632,6 +632,7 @@ export interface CopilotAskRequest {
   question: string;
   intent?: CopilotIntent;
   business_entity_id?: string;
+  utc_offset_minutes?: number;
 }
 
 /**

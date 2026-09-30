@@ -51,6 +51,7 @@ from app.core.models import ActionItem, ActionStatus
 from app.core.services.audit_service import AuditService
 from app.dependencies import not_found, scope_select
 from app.modules.cwi.models import (
+    CalendarSource,
     CalendarEventLink,
     CalendarSyncStatus,
     ConnectionStatus,
@@ -255,6 +256,62 @@ class CalendarService:
         return ""
 
     # -- Event payload building ---------------------------------------------
+
+    def sync_sources(self, org_id: UUID, user_id: UUID, connection_id: UUID) -> int:
+        connection = self._get_connection(org_id, connection_id, user_id)
+        # Serialize snapshots per connection, including requests from other tabs.
+        self.db.execute(select(IntegrationConnection).where(
+            IntegrationConnection.id == connection.id
+        ).with_for_update()).scalar_one()
+        try:
+            token = self._access_token(org_id, user_id, connection_id)
+            events = self.calendar.list_events(access_token=token)
+        except (CalendarClientError, GoogleOAuthError):
+            connection.last_error = "Calendar sync failed. Please retry or reconnect."
+            self.db.flush()
+            raise
+
+        existing = {row.google_event_id: row for row in self.db.scalars(
+            select(CalendarSource).where(
+                CalendarSource.organization_id == org_id,
+                CalendarSource.integration_connection_id == connection_id,
+            )
+        )}
+        seen = set()
+        now = datetime.now(timezone.utc)
+        for event in events:
+            if event.get("status") == "cancelled":
+                continue
+            event_id = str(event["id"])
+            seen.add(event_id)
+            row = existing.get(event_id)
+            if row is None:
+                row = CalendarSource(organization_id=org_id,
+                    integration_connection_id=connection_id, google_event_id=event_id)
+                existing[event_id] = row
+                self.db.add(row)
+            values = {
+                "title": str(event.get("summary") or "Untitled event"),
+                "description": str(event.get("description") or ""),
+                "location": str(event.get("location") or ""),
+                "starts_at": str((event.get("start") or {}).get("dateTime") or (event.get("start") or {}).get("date") or ""),
+                "ends_at": str((event.get("end") or {}).get("dateTime") or (event.get("end") or {}).get("date") or ""),
+                "html_link": str(event.get("htmlLink") or ""),
+            }
+            if any(getattr(row, field) != value for field, value in values.items()):
+                for field, value in values.items():
+                    setattr(row, field, value)
+                row.updated_at = now
+        # Remove local snapshots only after the entire provider read succeeds.
+        for event_id, row in existing.items():
+            if event_id not in seen:
+                from app.modules.cwi.services.source_proposal_service import discard_unapproved
+                discard_unapproved(self.db, org_id, "calendar", [row.id])
+                self.db.delete(row)
+        connection.last_sync_at = now
+        connection.last_error = None
+        self.db.flush()
+        return len(seen)
 
     def _event_from_action(
         self, action: ActionItem, req: CalendarAddRequest

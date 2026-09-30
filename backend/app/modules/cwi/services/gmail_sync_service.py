@@ -73,8 +73,8 @@ from app.modules.cwi.models import (
     SenderSignalType,
 )
 from app.modules.cwi.schemas import InitialSyncOptions
-from app.modules.cwi.services.gmail_client import GmailClient, GmailMessage
-from app.modules.cwi.services.google_oauth import GMAIL_READONLY_SCOPE
+from app.modules.cwi.services.gmail_client import GmailClient, GmailMessage, GmailClientError
+from app.modules.cwi.services.google_oauth import GMAIL_READONLY_SCOPE, GoogleOAuthError
 from app.modules.cwi.services.integration_service import IntegrationService
 
 # Relevance values whose content is noise: excluded from knowledge and from
@@ -491,11 +491,8 @@ class GmailSyncService:
         """
 
         connection = self._get_connection(org_id, connection_id, user_id)
-        token = self._access_token(org_id, user_id, connection_id)
         label_ids = list(opts.labels) if opts.labels else None
-        messages = self.gmail.list_messages(
-            access_token=token, label_ids=label_ids
-        )
+        messages = self._read_messages(org_id, user_id, connection, label_ids)
 
         now = datetime.now(timezone.utc)
         run = SyncRun()
@@ -510,6 +507,7 @@ class GmailSyncService:
 
         run.suggestions_created = self._count_suggestions(org_id, run.record_ids)
         connection.last_sync_at = now
+        connection.last_error = None
         self.db.add(connection)
         self.db.flush()
         return run
@@ -526,8 +524,7 @@ class GmailSyncService:
         """
 
         connection = self._get_connection(org_id, connection_id, user_id)
-        token = self._access_token(org_id, user_id, connection_id)
-        messages = self.gmail.list_messages(access_token=token)
+        messages = self._read_messages(org_id, user_id, connection)
 
         # Permissive defaults for an incremental pull; dedup does the rest.
         opts = InitialSyncOptions(
@@ -552,9 +549,19 @@ class GmailSyncService:
 
         run.suggestions_created = self._count_suggestions(org_id, run.record_ids)
         connection.last_sync_at = now
+        connection.last_error = None
         self.db.add(connection)
         self.db.flush()
         return run
+
+    def _read_messages(self, org_id, user_id, connection, label_ids=None):
+        try:
+            token = self._access_token(org_id, user_id, connection.id)
+            return self.gmail.list_messages(access_token=token, label_ids=label_ids)
+        except (GmailClientError, GoogleOAuthError):
+            connection.last_error = "Gmail sync failed. Please retry or reconnect."
+            self.db.flush()
+            raise
 
     def _count_suggestions(
         self, org_id: UUID, record_ids: list[UUID]
@@ -808,6 +815,9 @@ class GmailSyncService:
         """
 
         record = self.get_message_record(org_id, user_id, record_id)
+
+        from app.modules.cwi.services.source_proposal_service import discard_unapproved
+        discard_unapproved(self.db, org_id, "email", [record.id])
 
         self.db.execute(
             sa_delete(EmailTaskSuggestion).where(

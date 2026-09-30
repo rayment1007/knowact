@@ -14,7 +14,9 @@
 // Loading / empty / error surfaces reuse the shared feedback components. No
 // token or secret is ever displayed — the API views never carry one.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { peekCache } from "@/api/cache";
+import { useQueryRefresh } from "@/hooks/useQueryRefresh";
 import {
   ApiError,
   documentsApi,
@@ -56,10 +58,11 @@ const RETENTION_MODES: { value: RawEmailRetentionMode; label: string }[] = [
   { value: "RAW_AND_EXTRACTED", label: "Keep raw and extracted content" },
 ];
 
-export default function PrivacyPage() {
-  const [connections, setConnections] = useState<SyncStatus[]>([]);
-  const [documents, setDocuments] = useState<DocumentAsset[]>([]);
-  const [loading, setLoading] = useState(true);
+export default function PrivacyPage({ embedded = false }: { embedded?: boolean }) {
+  const [connections, setConnections] = useState<SyncStatus[]>(() => peekCache<SyncStatus[]>("/privacy/sync-status") ?? []);
+  const [documents, setDocuments] = useState<DocumentAsset[]>(() => peekCache<DocumentAsset[]>("/documents") ?? []);
+  const [loading, setLoading] = useState(() => !peekCache("/privacy/sync-status"));
+  const loaded = useRef(!!peekCache("/privacy/sync-status"));
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -80,7 +83,7 @@ export default function PrivacyPage() {
   const [provenanceError, setProvenanceError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    setLoading(true);
+    setLoading(!loaded.current);
     setError(null);
     try {
       const [status, docs] = await Promise.all([
@@ -89,12 +92,16 @@ export default function PrivacyPage() {
       ]);
       setConnections(status);
       setDocuments(docs);
+      loaded.current = true;
     } catch {
       setError("Could not load your privacy settings. Please retry.");
     } finally {
       setLoading(false);
     }
   }, []);
+
+  useQueryRefresh("/privacy", load);
+  useQueryRefresh("/documents", load);
 
   useEffect(() => {
     void load();
@@ -177,18 +184,18 @@ export default function PrivacyPage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-4xl px-6 py-8">
+      <div className={embedded ? "" : "mx-auto max-w-4xl px-6 py-8"}>
         <LoadingState variant="skeleton" rows={4} />
       </div>
     );
   }
 
   return (
-    <div className="mx-auto max-w-4xl px-6 py-8">
+    <div className={embedded ? "" : "mx-auto max-w-4xl px-6 py-8"}>
       <header className="mb-6">
-        <h1 className="text-xl font-semibold text-slate-900">
+        <h2 className="text-lg font-semibold text-slate-900">
           Privacy &amp; data control
-        </h1>
+        </h2>
         <p className="mt-1 text-sm text-slate-500">
           Disconnect or revoke connected services, delete imported data, choose
           how long raw email is kept, and see exactly what data grounded an AI
@@ -213,6 +220,7 @@ export default function PrivacyPage() {
           ) : null}
 
           {/* Connections & last-sync status ------------------------------- */}
+          {!embedded && <>
           <section>
             <h2 className="mb-3 text-sm font-semibold text-slate-900">
               Connections &amp; sync status
@@ -296,6 +304,8 @@ export default function PrivacyPage() {
           </section>
 
           {/* Delete imported email data ----------------------------------- */}
+          </>}
+
           <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
             <h2 className="text-sm font-semibold text-slate-900">
               Delete imported email data

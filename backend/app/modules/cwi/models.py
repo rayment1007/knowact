@@ -56,6 +56,40 @@ from app.config import get_settings
 from app.core.models import Sensitivity, SuggestionStatus
 from app.database import Base, OrganizationScopedMixin
 
+
+class SourceProposal(OrganizationScopedMixin, Base):
+    """An editable draft requested by its owner, separate from accepted records.
+
+    Source identifiers are polymorphic provenance, intentionally not cascading
+    foreign keys: deleting raw evidence must not delete approved knowledge/tasks.
+    Deletion services remove unapproved drafts; approved provenance is retained.
+    """
+
+    __tablename__ = "source_proposals"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    source_title: Mapped[str] = mapped_column(Text, nullable=False)
+    source_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    target: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="SUGGESTED")
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    evidence_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    analysis_truncated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    sensitivity_acknowledged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    provider: Mapped[str] = mapped_column(String(16), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    result_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    active_key: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    __table_args__ = (
+        Index("ix_source_proposals_owner_status", "organization_id", "user_id", "status"),
+        Index("ix_source_proposals_origin", "source_kind", "source_id"),
+        Index("ix_source_proposals_result", "target", "result_id"),
+    )
+
 # ---------------------------------------------------------------------------
 # Enumerations
 # ---------------------------------------------------------------------------
@@ -347,6 +381,29 @@ class IntegrationConnection(OrganizationScopedMixin, Base):
 # ---------------------------------------------------------------------------
 # EmailMessageRecord (M6.2)
 # ---------------------------------------------------------------------------
+
+
+class CalendarSource(OrganizationScopedMixin, Base):
+    """Read-only snapshot of a primary-calendar event, separate from writes."""
+
+    __tablename__ = "calendar_sources"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    integration_connection_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("integration_connections.id"), nullable=False
+    )
+    google_event_id: Mapped[str] = mapped_column(String(1024), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    location: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    starts_at: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    ends_at: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    html_link: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        UniqueConstraint("integration_connection_id", "google_event_id", name="uq_calendar_source_event"),
+        Index("ix_calendar_sources_org_connection", "organization_id", "integration_connection_id"),
+    )
 
 
 class EmailMessageRecord(OrganizationScopedMixin, Base):

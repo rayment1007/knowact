@@ -1,19 +1,20 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { ProtectedRoute } from "@/auth";
 import AppShell from "@/layouts/AppShell";
+import { useLocation } from "react-router-dom";
+import SettingsPage from "@/pages/SettingsPage";
+import SearchPage from "@/pages/SearchPage";
+import WorkspacePage, { LegacyWorkspaceRedirect } from "@/pages/WorkspacePage";
+import WorkspaceActivityPage from "@/pages/WorkspaceActivityPage";
 import LoginPage from "@/pages/LoginPage";
 import EnterpriseDashboardPage from "@/pages/EnterpriseDashboardPage";
-import SourceInboxPage from "@/pages/SourceInboxPage";
-import KnowledgeHubPage from "@/pages/KnowledgeHubPage";
 import ActionCenterPage from "@/pages/ActionCenterPage";
-import DecisionMemoryPage from "@/pages/DecisionMemoryPage";
-import IntegrationsPage from "@/pages/IntegrationsPage";
-import GmailSyncPage from "@/pages/GmailSyncPage";
-import DocumentsPage from "@/pages/DocumentsPage";
-import CopilotPage from "@/pages/CopilotPage";
 import EmailDraftsPage from "@/pages/EmailDraftsPage";
-import PrivacyPage from "@/pages/PrivacyPage";
-import VerificationPage from "@/pages/VerificationPage";
+
+function SettingsRedirect() {
+  const location = useLocation();
+  return <Navigate to={`/settings${location.search}`} replace />;
+}
 
 // Application routes. All shell routes sit behind ProtectedRoute, which
 // redirects unauthenticated users to /login.
@@ -25,23 +26,32 @@ export default function App() {
       <Route element={<ProtectedRoute />}>
         <Route element={<AppShell />}>
           <Route index element={<EnterpriseDashboardPage />} />
-          <Route path="source-inbox" element={<SourceInboxPage />} />
-          <Route path="knowledge" element={<KnowledgeHubPage />} />
-          <Route path="knowledge/:knowledgeId" element={<KnowledgeHubPage />} />
-          <Route path="actions" element={<ActionCenterPage />} />
-          <Route path="actions/:actionId" element={<ActionCenterPage />} />
-          <Route path="decisions" element={<DecisionMemoryPage />} />
-          <Route path="decisions/:decisionId" element={<DecisionMemoryPage />} />
-          <Route path="integrations" element={<IntegrationsPage />} />
-          <Route path="gmail" element={<GmailSyncPage />} />
-          <Route path="emails/:emailId" element={<GmailSyncPage />} />
-          <Route path="documents" element={<DocumentsPage />} />
-          <Route path="documents/:documentId" element={<DocumentsPage />} />
+          <Route path="workspace" element={<Navigate to="/workspace/sources" replace />} />
+          <Route path="workspace/:section" element={<WorkspacePage />} />
+          <Route path="source-inbox" element={<LegacyWorkspaceRedirect />} />
+          <Route path="source-inbox/:sourceId" element={<LegacyWorkspaceRedirect />} />
+          <Route path="search" element={<SearchPage />} />
+          <Route path="activity" element={<WorkspaceActivityPage />} />
+          <Route path="calendar-sources" element={<LegacyWorkspaceRedirect />} />
+          <Route path="calendar-sources/:sourceId" element={<LegacyWorkspaceRedirect />} />
+          <Route path="settings" element={<SettingsPage />} />
+          <Route path="knowledge" element={<LegacyWorkspaceRedirect />} />
+          <Route path="knowledge/:knowledgeId" element={<LegacyWorkspaceRedirect />} />
+          <Route path="actions" element={<LegacyWorkspaceRedirect />} />
+          <Route path="actions/:actionId" element={<LegacyWorkspaceRedirect />} />
+          <Route path="decisions" element={<Navigate to="/knowledge" replace />} />
+          <Route path="decisions/:decisionId" element={<Navigate to="/knowledge" replace />} />
+          <Route path="integrations" element={<SettingsRedirect />} />
+          <Route path="gmail" element={<LegacyWorkspaceRedirect />} />
+          <Route path="emails/:emailId" element={<LegacyWorkspaceRedirect />} />
+          <Route path="documents" element={<LegacyWorkspaceRedirect />} />
+          <Route path="documents/:documentId" element={<LegacyWorkspaceRedirect />} />
           <Route path="calendar/:calendarLinkId" element={<ActionCenterPage />} />
-          <Route path="copilot" element={<CopilotPage />} />
+          <Route path="copilot" element={<EnterpriseDashboardPage />} />
           <Route path="email-drafts" element={<EmailDraftsPage />} />
-          <Route path="privacy" element={<PrivacyPage />} />
-          <Route path="verification" element={<VerificationPage />} />
+          <Route path="email-drafts/:draftId" element={<EmailDraftsPage />} />
+          <Route path="privacy" element={<SettingsRedirect />} />
+          <Route path="verification" element={<Navigate to="/knowledge" replace />} />
         </Route>
       </Route>
 

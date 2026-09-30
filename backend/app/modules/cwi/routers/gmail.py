@@ -48,7 +48,7 @@ from app.modules.cwi.schemas import (
     SenderSignalView,
     SyncRunResponse,
 )
-from app.modules.cwi.services.gmail_client import GmailClient
+from app.modules.cwi.services.gmail_client import GmailClient, GmailClientError
 from app.modules.cwi.services.gmail_sync_service import GmailSyncService, SyncRun
 from app.modules.cwi.services.google_oauth import (
     GoogleOAuthClient,
@@ -122,10 +122,10 @@ def initial_sync(
         run = service.start_initial_sync(
             user.organization_id, user.id, connection_id, options
         )
-    except GoogleOAuthError:
+    except (GoogleOAuthError, GmailClientError):
         return JSONResponse(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            content={"detail": "Gmail authorization expired. Please reconnect."},
+            content={"detail": "Gmail sync failed. Please retry or reconnect."},
         )
     return _run_response(run)
 
@@ -140,10 +140,10 @@ def sync_now(
 
     try:
         run = service.sync_now(user.organization_id, user.id, connection_id)
-    except GoogleOAuthError:
+    except (GoogleOAuthError, GmailClientError):
         return JSONResponse(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            content={"detail": "Gmail authorization expired. Please reconnect."},
+            content={"detail": "Gmail sync failed. Please retry or reconnect."},
         )
     return _run_response(run)
 

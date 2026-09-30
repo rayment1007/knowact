@@ -364,6 +364,8 @@ class CopilotAskRequest(BaseModel):
     intent: Literal["ASK", "DRAFT", "ACT"] | None = None
     business_entity_id: UUID | None = None
 
+    utc_offset_minutes: int = Field(default=0, ge=-840, le=840)
+
 
 class Citation(BaseModel):
     """A single grounded citation (design *Citation Contract*).

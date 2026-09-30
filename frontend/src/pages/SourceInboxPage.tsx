@@ -1,3 +1,6 @@
+import { Link, useParams, useSearchParams } from "react-router-dom";
+import { invalidateApiCache, matchesPaths, peekCache, subscribeCacheInvalidation } from "@/api/cache";
+import { useQueryRefresh } from "@/hooks/useQueryRefresh";
 // SourceInboxPage: the "Collect → Classify → Connect" surface of the pipeline.
 //
 // Responsibilities (Requirements 3, 4, 5, 6):
@@ -107,8 +110,8 @@ interface AddSourceItemFormProps {
   onCreated: (item: SourceItem) => void;
 }
 
-function AddSourceItemForm({ onCreated }: AddSourceItemFormProps) {
-  const [sourceType, setSourceType] = useState<SourceType>("EMAIL");
+export function AddSourceItemForm({ onCreated }: AddSourceItemFormProps) {
+  const [sourceType, setSourceType] = useState<SourceType>("MANUAL");
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -249,11 +252,13 @@ interface SourceItemCardProps {
   item: SourceItem;
   onItemChanged: (item: SourceItem) => void;
   onDeleted: (itemId: string) => void;
+  initiallyExpanded?: boolean;
+  panel?: boolean;
 }
 
-function SourceItemCard({ item, onItemChanged, onDeleted }: SourceItemCardProps) {
-  const [expanded, setExpanded] = useState(false);
-  const [detail, setDetail] = useState<SourceItemDetail | null>(null);
+export function SourceItemCard({ item, onItemChanged, onDeleted, initiallyExpanded = false, panel = false }: SourceItemCardProps) {
+  const [expanded, setExpanded] = useState(initiallyExpanded);
+  const [detail, setDetail] = useState<SourceItemDetail | null>(() => peekCache<SourceItemDetail>(`/source-items/${item.id}`) ?? null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const detailRequestGeneration = useRef(0);
@@ -293,11 +298,18 @@ function SourceItemCard({ item, onItemChanged, onDeleted }: SourceItemCardProps)
     }
   }, [item.id, onItemChanged]);
 
+  useQueryRefresh(`/source-items/${item.id}`, () => {
+    if (expanded) void loadDetail();
+    else setDetail(null);
+  });
+
   useEffect(() => {
     return () => {
       detailRequestGeneration.current += 1;
     };
   }, [item.id]);
+
+  useEffect(() => { if (initiallyExpanded) void loadDetail(); }, [initiallyExpanded, loadDetail]);
 
   function toggleExpanded() {
     const next = !expanded;
@@ -420,8 +432,8 @@ function SourceItemCard({ item, onItemChanged, onDeleted }: SourceItemCardProps)
   }
 
   return (
-    <li className="rounded-xl border border-slate-200 bg-white shadow-sm">
-      <button
+    <li className={panel ? "list-none" : "rounded-xl border border-slate-200 bg-white shadow-sm"}>
+      {!panel && <button
         type="button"
         onClick={toggleExpanded}
         aria-expanded={expanded}
@@ -448,10 +460,10 @@ function SourceItemCard({ item, onItemChanged, onDeleted }: SourceItemCardProps)
         <span className="shrink-0 text-xs font-medium text-brand-600">
           {expanded ? "Hide" : "Open"}
         </span>
-      </button>
+      </button>}
 
       {expanded ? (
-        <div className="border-t border-slate-100 px-5 py-4">
+        <div className={panel ? "" : "border-t border-slate-100 px-5 py-4"}>
           {loadingDetail ? (
             <LoadingState label="Loading details…" />
           ) : detailError ? (
@@ -459,14 +471,14 @@ function SourceItemCard({ item, onItemChanged, onDeleted }: SourceItemCardProps)
           ) : (
             <div className="space-y-4">
               {/* Full content */}
-              <div>
+              {!panel && <div>
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
                   Content
                 </div>
                 <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">
                   {detail?.source_item.content ?? item.content}
                 </p>
-              </div>
+              </div>}
 
               {/* Classification */}
               {classification ? (
@@ -681,8 +693,14 @@ function SourceItemCard({ item, onItemChanged, onDeleted }: SourceItemCardProps)
 // ---------------------------------------------------------------------------
 
 export default function SourceInboxPage() {
-  const [items, setItems] = useState<SourceItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { sourceId } = useParams();
+  const [params, setParams] = useSearchParams();
+  const reviewPending = params.get("review") === "1";
+  const cachedDetail = sourceId ? peekCache<SourceItemDetail>(`/source-items/${sourceId}`) : undefined;
+  const cachedItems = sourceId ? cachedDetail ? [cachedDetail.source_item] : undefined : peekCache<SourceItem[]>(`/source-items${reviewPending ? "?review_pending=true" : ""}`);
+  const [items, setItems] = useState<SourceItem[]>(cachedItems ?? []);
+  const [loading, setLoading] = useState(!cachedItems);
+  const loaded = useRef(!!cachedItems);
   const [error, setError] = useState<string | null>(null);
   const listRequestGeneration = useRef(0);
 
@@ -693,18 +711,20 @@ export default function SourceInboxPage() {
     () => ({
       status: statusFilter || undefined,
       category: categoryFilter || undefined,
+      reviewPending: reviewPending || undefined,
     }),
-    [statusFilter, categoryFilter],
+    [statusFilter, categoryFilter, reviewPending],
   );
 
   const loadItems = useCallback(async () => {
     const requestGeneration = ++listRequestGeneration.current;
-    setLoading(true);
+    setLoading(!loaded.current);
     setError(null);
     try {
-      const result = await sourceItemsApi.list(filters);
+      const result = sourceId ? [(await sourceItemsApi.get(sourceId)).source_item] : await sourceItemsApi.list(filters);
       if (requestGeneration !== listRequestGeneration.current) return;
       setItems(result);
+      loaded.current = true;
     } catch {
       if (requestGeneration !== listRequestGeneration.current) return;
       setError("Could not load the inbox. Please retry.");
@@ -713,7 +733,11 @@ export default function SourceInboxPage() {
         setLoading(false);
       }
     }
-  }, [filters]);
+  }, [filters, sourceId]);
+
+  useEffect(() => subscribeCacheInvalidation(paths => {
+    if (matchesPaths("/source-items", paths)) void loadItems();
+  }), [loadItems]);
 
   useEffect(() => {
     void loadItems();
@@ -724,8 +748,8 @@ export default function SourceInboxPage() {
 
   const handleCreated = useCallback((item: SourceItem) => {
     // Prepend the new item so it appears immediately without a full reload.
-    setItems((current) => [item, ...current]);
-  }, []);
+    if (!reviewPending) setItems((current) => [item, ...current.filter(existing => existing.id !== item.id)]);
+  }, [reviewPending]);
 
   const handleItemChanged = useCallback((updated: SourceItem) => {
     setItems((current) =>
@@ -747,9 +771,18 @@ export default function SourceInboxPage() {
         </p>
       </header>
 
-      <AddSourceItemForm onCreated={handleCreated} />
+      {!sourceId && <div id="add-information" className="rounded-xl border border-slate-200 bg-white p-5">
+        <div className="mb-4 flex items-center justify-between"><h2 className="font-semibold">Add information</h2><Link to="/documents" className="text-sm font-medium text-blue-600">Upload a file ?</Link></div>
+        <AddSourceItemForm onCreated={handleCreated} />
+      </div>}
+      {sourceId && <Link to="/source-inbox" className="text-sm text-blue-600">? All sources</Link>}
 
       {/* Filters (Requirement 3.2) */}
+      {!sourceId && <label className="mt-6 flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={reviewPending} onChange={event => {
+        const next = new URLSearchParams(params);
+        if (event.target.checked) next.set("review", "1"); else next.delete("review");
+        setParams(next, { replace: true });
+      }} />AI classification suggestions awaiting review</label>}
       <div className="mt-6 flex flex-wrap items-end gap-4">
         <div>
           <label
@@ -799,7 +832,7 @@ export default function SourceInboxPage() {
 
         <button
           type="button"
-          onClick={() => void loadItems()}
+          onClick={() => invalidateApiCache(["/source-items"])}
           className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
         >
           Refresh

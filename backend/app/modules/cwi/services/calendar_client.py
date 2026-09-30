@@ -119,6 +119,9 @@ class CalendarClient(Protocol):
     a deterministic fake. No CWI code depends on the concrete type.
     """
 
+    def list_events(self, *, access_token: str) -> list[dict]:
+        """Read the complete primary-calendar event snapshot, following pages."""
+
     def list_calendars(self, *, access_token: str) -> list[CalendarInfo]:
         """Return the writable calendars for the authorized account."""
 
@@ -192,6 +195,10 @@ class FakeCalendarClient:
         self.update_calls: int = 0
         self.delete_calls: int = 0
         self.fail_next_create: bool = False
+        self.source_events: list[dict] = []
+
+    def list_events(self, *, access_token: str) -> list[dict]:
+        return list(self.source_events)
 
     def set_calendars(self, calendars: list[CalendarInfo]) -> None:
         """Replace the canned writable-calendar set."""
@@ -329,6 +336,33 @@ class HttpCalendarClient:
         )
 
     # -- Public API ---------------------------------------------------------
+
+    def list_events(self, *, access_token: str) -> list[dict]:
+        # Keep recurring masters (no unbounded recurrence expansion). A full
+        # snapshot also observes deletions without persisting expired tokens.
+        events: list[dict] = []
+        params: dict[str, str | int] = {"maxResults": 2500, "singleEvents": "false"}
+        seen_tokens: set[str] = set()
+        try:
+            with self._client(access_token) as http:
+                while True:
+                    response = http.get("/calendars/primary/events", params=params)
+                    response.raise_for_status()
+                    payload = response.json()
+                    items = payload.get("items", [])
+                    if not isinstance(items, list) or any(not isinstance(item, dict) or not item.get("id") for item in items):
+                        raise ValueError("Invalid event response")
+                    events.extend(items)
+                    token = payload.get("nextPageToken")
+                    if not token:
+                        return events
+                    if token in seen_tokens:
+                        raise ValueError("Repeated page token")
+                    seen_tokens.add(token)
+                    params["pageToken"] = token
+        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+            _log_calendar_error("list_events", exc)
+            raise CalendarClientError("Calendar events could not be read. Please retry or reconnect.") from exc
 
     def list_calendars(self, *, access_token: str) -> list[CalendarInfo]:
         try:

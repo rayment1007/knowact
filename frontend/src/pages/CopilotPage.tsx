@@ -13,7 +13,7 @@
 // The Copilot never mutates on ask; every artifact requires explicit human
 // confirmation. Loading/empty/error states reuse the shared feedback surfaces.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ApiError, copilotApi } from "@/api";
 import type {
@@ -45,7 +45,7 @@ function describeError(err: unknown): string {
   return "The Copilot could not answer. Please retry.";
 }
 
-function CitationList({ citations }: { citations: Citation[] }) {
+export function CitationList({ citations }: { citations: Citation[] }) {
   if (citations.length === 0) return null;
   return (
     <div className="mt-3">
@@ -53,16 +53,17 @@ function CitationList({ citations }: { citations: Citation[] }) {
         Citations
       </div>
       <ul className="mt-2 space-y-2">
-        {citations.map((citation) => (
+        {citations.map((citation, index) => (
           <li
             key={citation.source_id}
+            id={`citation-${citation.source_id}`}
             className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
           >
             <div className="flex items-center gap-2">
               <span className="rounded bg-brand-100 px-2 py-0.5 text-[11px] font-medium text-brand-700">
-                {citation.source_type}
+                [{index + 1}] {citation.source_type}
               </span>
-              <span className="truncate text-sm font-medium text-slate-800">
+              <span className="min-w-0 break-words text-sm font-medium text-slate-800">
                 {citation.title}
               </span>
             </div>
@@ -80,6 +81,19 @@ function CitationList({ citations }: { citations: Citation[] }) {
       </ul>
     </div>
   );
+}
+
+/** Backend-validated citation links; no model-provided URLs enter the answer. */
+export function AnswerText({ answer, citations }: { answer: string; citations: Citation[] }) {
+  let text = answer;
+  citations.forEach((citation, index) => {
+    text = text.split(`(id=${citation.source_id})`).join(`[${index + 1}]`).split(citation.source_id).join(`[${index + 1}]`);
+  });
+  return <>{text.split(/(\[\d+\])/g).map((part, index) => {
+    const number = /^\[(\d+)\]$/.exec(part);
+    const citation = number ? citations[Number(number[1]) - 1] : undefined;
+    return citation ? <Link key={index} to={citation.deep_link} title={citation.title} aria-label={`Source ${number![1]}: ${citation.title}`} className="font-medium text-blue-700 hover:underline">{part}</Link> : part;
+  })}</>;
 }
 
 interface ArtifactCardProps {
@@ -179,8 +193,8 @@ function AnswerCard({
         ) : (
           <>
             {response.answer ? (
-              <p className="whitespace-pre-line text-sm text-slate-800">
-                {response.answer}
+              <p className="whitespace-pre-line break-words text-sm leading-relaxed text-slate-800">
+                <AnswerText answer={response.answer} citations={response.citations} />
               </p>
             ) : null}
             <CitationList citations={response.citations} />
@@ -199,12 +213,18 @@ function AnswerCard({
   );
 }
 
-export default function CopilotPage() {
+export default function CopilotPage({ embedded = false }: { embedded?: boolean }) {
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [suggested, setSuggested] = useState<string[]>([]);
   const [asking, setAsking] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const transcript = useRef<HTMLDivElement>(null);
+  const followLatest = useRef(true);
+  useLayoutEffect(() => {
+    if (followLatest.current && transcript.current) transcript.current.scrollTop = transcript.current.scrollHeight;
+  }, [turns]);
+
 
   useEffect(() => {
     let cancelled = false;
@@ -226,6 +246,7 @@ export default function CopilotPage() {
       const trimmed = text.trim();
       if (!trimmed || asking) return;
 
+      followLatest.current = true;
       const id = turnId();
       setTurns((prev) => [
         ...prev,
@@ -289,16 +310,19 @@ export default function CopilotPage() {
   }, [confirming]);
 
   return (
-    <div className="mx-auto flex h-full max-w-3xl flex-col px-6 py-8">
-      <header className="mb-4">
-        <h1 className="text-xl font-semibold text-slate-900">Copilot</h1>
-        <p className="mt-1 text-sm text-slate-500">
-          Ask about your confirmed, permitted data. Every answer is grounded in
-          cited evidence, and the Copilot never acts without your confirmation.
+    <div className={`mx-auto flex h-full min-h-0 max-w-3xl flex-col ${embedded ? "p-4" : "px-6 py-8"}`}>
+      <header className="mb-3 shrink-0">
+        {!embedded && <h1 className="text-xl font-semibold text-slate-900">Copilot</h1>}
+        <p className={`mt-1 ${embedded ? "text-xs" : "text-sm"} text-slate-500`}>
+          {embedded ? "Answers use saved workspace data. Open a citation to check its source." : "Ask about your saved, permitted data. Check the cited evidence; actions require your confirmation."}
         </p>
-        <OperationalSupportDisclaimer variant="banner" className="mt-3" />
+        {!embedded && <OperationalSupportDisclaimer variant="banner" className="mt-3" />}
       </header>
 
+      <div ref={transcript} role="log" aria-label="Copilot conversation" aria-live="polite" onScroll={() => {
+        const node = transcript.current;
+        if (node) followLatest.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+      }} className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain pr-1">
       {turns.length === 0 ? (
         <section className="mb-4">
           <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
@@ -320,7 +344,6 @@ export default function CopilotPage() {
         </section>
       ) : null}
 
-      <div className="flex-1 space-y-5 overflow-y-auto">
         {turns.map((turn) => (
           <AnswerCard
             key={turn.id}
@@ -332,7 +355,7 @@ export default function CopilotPage() {
       </div>
 
       <form
-        className="mt-4 flex items-end gap-2"
+        className="mt-3 flex shrink-0 items-end gap-2 border-t border-slate-100 pt-3"
         onSubmit={(event) => {
           event.preventDefault();
           void submit(question);
@@ -348,8 +371,9 @@ export default function CopilotPage() {
             }
           }}
           rows={2}
+          aria-label="Ask Copilot"
           placeholder="Ask a grounded question, or draft/propose something…"
-          className="min-h-[44px] flex-1 resize-none rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
+          className="min-h-[44px] min-w-0 flex-1 resize-none rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
         />
         <button
           type="submit"

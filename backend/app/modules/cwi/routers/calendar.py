@@ -38,7 +38,7 @@ from app.modules.cwi.schemas import (
     CalendarUpdateRequest,
     CalendarView,
 )
-from app.modules.cwi.services.calendar_client import CalendarClient, CalendarInfo
+from app.modules.cwi.services.calendar_client import CalendarClient, CalendarInfo, CalendarClientError
 from app.modules.cwi.services.calendar_service import CalendarService
 from app.modules.cwi.services.google_oauth import (
     GoogleOAuthClient,
@@ -64,6 +64,20 @@ def _service(
         integration_service=integration_service,
         settings=settings,
     )
+
+
+@router.post("/calendar/{connection_id}/sync-now")
+def sync_sources(
+    connection_id: UUID,
+    service: CalendarService = Depends(_service),
+    user: User = Depends(get_current_user),
+):
+    try:
+        count = service.sync_sources(user.organization_id, user.id, connection_id)
+    except (CalendarClientError, GoogleOAuthError):
+        # Return normally so get_db persists the failure status, not a success timestamp.
+        return JSONResponse(status_code=502, content={"detail": "Calendar sync failed. Please retry or reconnect."})
+    return {"events_synced": count}
 
 
 def _calendar_view(info: CalendarInfo) -> CalendarView:

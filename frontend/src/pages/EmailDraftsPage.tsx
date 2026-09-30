@@ -1,3 +1,4 @@
+import { Link, useParams } from "react-router-dom";
 // EmailDraftsPage: the AI-assisted Gmail draft workspace (M6.6, Requirement 32).
 //
 // Responsibilities:
@@ -14,7 +15,9 @@
 // email is never sent automatically, and sending always requires the separate
 // confirm gate. Loading/empty/error states reuse the shared feedback surfaces.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { peekCache } from "@/api/cache";
+import { useQueryRefresh } from "@/hooks/useQueryRefresh";
 import { ApiError, emailDraftsApi, integrationsApi } from "@/api";
 import type {
   EmailDraft,
@@ -408,10 +411,13 @@ function DraftDetail({
 }
 
 export default function EmailDraftsPage() {
-  const [drafts, setDrafts] = useState<EmailDraft[]>([]);
-  const [connections, setConnections] = useState<IntegrationConnection[]>([]);
+  const { draftId } = useParams();
+  const [drafts, setDrafts] = useState<EmailDraft[]>(() => peekCache<EmailDraft[]>("/email-drafts") ?? []);
+  const [connections, setConnections] = useState<IntegrationConnection[]>(() => peekCache<IntegrationConnection[]>("/integrations") ?? []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !peekCache("/email-drafts"));
+  const loaded = useRef(!!peekCache("/email-drafts"));
+  const requestGeneration = useRef(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [recipientError, setRecipientError] = useState<string | null>(null);
@@ -434,25 +440,33 @@ export default function EmailDraftsPage() {
   );
 
   const load = useCallback(async () => {
-    setLoading(true);
+    const generation = ++requestGeneration.current;
+    setLoading(!loaded.current);
     setLoadError(null);
     try {
       const [draftList, connectionList] = await Promise.all([
         emailDraftsApi.list(),
         integrationsApi.list(),
       ]);
+      if (generation !== requestGeneration.current) return;
       setDrafts(draftList);
+      loaded.current = true;
       setConnections(connectionList);
-      setSelectedId((prev) => prev ?? draftList[0]?.id ?? null);
+      setSelectedId(current => draftId ?? (draftList.some(draft => draft.id === current) ? current : draftList[0]?.id ?? null));
     } catch (err) {
+      if (generation !== requestGeneration.current) return;
       setLoadError(describeError(err, "Could not load drafts"));
     } finally {
-      setLoading(false);
+      if (generation === requestGeneration.current) setLoading(false);
     }
-  }, []);
+  }, [draftId]);
+
+  useQueryRefresh("/email-drafts", load);
+  useQueryRefresh("/integrations", load);
 
   useEffect(() => {
     void load();
+    return () => { requestGeneration.current++; };
   }, [load]);
 
   useEffect(() => {
@@ -562,6 +576,7 @@ export default function EmailDraftsPage() {
   return (
     <div className="mx-auto flex h-full max-w-6xl flex-col px-6 py-8">
       <header className="mb-4">
+        <Link to="/workspace/actions" className="mb-3 inline-block text-sm font-medium text-blue-700 hover:underline">? Workspace actions</Link>
         <h1 className="text-xl font-semibold text-slate-900">Gmail AI Drafts</h1>
         <p className="mt-1 text-sm text-slate-500">
           Draft grounded Gmail replies from your confirmed context. Recipients

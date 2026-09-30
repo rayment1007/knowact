@@ -3,6 +3,37 @@
 The plan: **Neon** hosts PostgreSQL, **Render** runs the FastAPI backend,
 **Vercel** serves the React SPA and proxies `/api/*` to Render.
 
+## Updating an existing deployment
+
+Keep the local backend and frontend running while reviewing changes. Before
+releasing this Workspace version:
+
+1. Run the frontend build and the affected backend/frontend tests. Review
+   `git diff` and stage the application files deliberately; keep `.env`, local
+   uploads, generated code dumps, and unrelated coursework out of the commit.
+2. Include migrations `0011_calendar_sources` and `0012_source_proposals` in the
+   release. Render's configured start command runs `alembic upgrade head`; do not
+   rerun the initial seed against an existing database. A local migration against
+   the same Neon database already changes that shared database, but does not
+   deploy any backend code.
+3. Decide how uploaded originals will persist before relying on the hosted app.
+   The checked-in Render configuration uses the free plan and local storage.
+   [Render free services lose local files on restart, redeploy, and spin-down](https://render.com/docs/free).
+   Neon retains extracted text and database records, not the uploaded binaries.
+   Local uploads are not transferred by a Git push. Durable originals require
+   persistent storage (for example, a paid Render disk with `STORAGE_ROOT` set to
+   its mount path), or an object-storage adapter, which is not implemented yet.
+4. Deploy the matching backend and frontend revisions together. A Vercel preview
+   still proxies to the Render host in `frontend/vercel.json`; a frontend preview
+   alone does not provide a matching preview API. Confirm the connected branches
+   and auto-deploy settings in both dashboards before pushing the release branch.
+5. Verify both the Render and Vercel `/api/health` endpoints, then test real Google
+   sign-in at the Vercel origin. Confirm production OAuth callback URLs and secure
+   cookies; do not copy localhost OAuth settings into production.
+6. Check sync timestamps, open an original source, generate/edit/approve one
+   source draft, follow its evidence link, and ask Copilot about today's tasks.
+   A build or health check alone does not verify those authenticated workflows.
+
 ## Why the Vercel proxy matters
 
 The browser only ever talks to your Vercel domain. Vercel forwards `/api/*` to
@@ -167,7 +198,8 @@ Confirm on the OAuth consent screen:
    SPA with a success banner.
 3. Gmail Sync → run a sync. Messages appear.
 4. Copilot → ask a question. The answer should carry citations.
-5. Gmail AI Drafts → create a draft, then send it to yourself.
+5. Actions → Gmail Drafts → create and review a draft. Sending email is not needed
+   to verify the phase-one draft workflow.
 
 ---
 

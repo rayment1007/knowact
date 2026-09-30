@@ -42,7 +42,7 @@ export interface ActionUpdate {
   description?: string;
   business_entity_id?: string;
   owner_id?: string;
-  due_date?: string;
+  due_date?: string | null;
   status?: ActionStatus;
   evidence_text?: string;
 }

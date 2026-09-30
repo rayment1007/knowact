@@ -27,12 +27,14 @@ import type {
 export interface InboxFilters {
   status?: SourceStatus;
   category?: BusinessCategory;
+  reviewPending?: boolean;
 }
 
 function buildInboxQuery(filters: InboxFilters = {}): string {
   const params = new URLSearchParams();
   if (filters.status) params.set("status", filters.status);
   if (filters.category) params.set("category", filters.category);
+  if (filters.reviewPending) params.set("review_pending", "true");
   const query = params.toString();
   return query ? `?${query}` : "";
 }

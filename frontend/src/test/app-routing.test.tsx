@@ -53,6 +53,15 @@ vi.mock("@/pages/VerificationPage", () => ({
   default: () => <h1>Verification page</h1>,
 }));
 
+vi.mock("@/pages/SettingsPage", () => ({ default: () => <h1>Settings page</h1> }));
+vi.mock("@/pages/SearchPage", () => ({ default: () => <h1>Search page</h1> }));
+vi.mock("@/pages/CalendarSourcesPage", () => ({ default: () => <h1>Calendar sources page</h1> }));
+
+vi.mock("@/pages/WorkspacePage", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/pages/WorkspacePage")>();
+  return { ...actual, default: () => <h1>Workspace page</h1> };
+});
+
 import App from "@/App";
 
 afterEach(cleanup);
@@ -68,24 +77,29 @@ function renderAt(pathname: string) {
 describe("application route compatibility", () => {
   it.each([
     ["/", "Dashboard page"],
-    ["/source-inbox", "Source Inbox page"],
-    ["/knowledge", "Knowledge Hub page"],
-    ["/actions", "Action Center page"],
-    ["/decisions", "Decision Memory page"],
-    ["/integrations", "Integrations page"],
-    ["/gmail", "Gmail Sync page"],
-    ["/documents", "Documents page"],
-    ["/copilot", "Copilot page"],
+    ["/source-inbox", "Workspace page"],
+    ["/source-inbox/source-1", "Workspace page"],
+    ["/settings", "Settings page"],
+    ["/search?q=uat", "Search page"],
+    ["/calendar-sources/event-1", "Workspace page"],
+    ["/email-drafts/draft-1", "Email Drafts page"],
+    ["/knowledge", "Workspace page"],
+    ["/actions", "Workspace page"],
+    ["/decisions", "Workspace page"],
+    ["/integrations", "Settings page"],
+    ["/gmail", "Workspace page"],
+    ["/documents", "Workspace page"],
+    ["/copilot", "Dashboard page"],
     ["/email-drafts", "Email Drafts page"],
-    ["/privacy", "Privacy page"],
-    ["/knowledge/knowledge-1", "Knowledge Hub page"],
-    ["/actions/action-1", "Action Center page"],
-    ["/decisions/decision-1", "Decision Memory page"],
-    ["/emails/email-1", "Gmail Sync page"],
+    ["/privacy", "Settings page"],
+    ["/knowledge/knowledge-1", "Workspace page"],
+    ["/actions/action-1", "Workspace page"],
+    ["/decisions/decision-1", "Workspace page"],
+    ["/emails/email-1", "Workspace page"],
     ["/calendar/link-1", "Action Center page"],
-    ["/documents/document-1", "Documents page"],
-    ["/knowledge?business_entity_id=entity-1", "Knowledge Hub page"],
-    ["/verification", "Verification page"],
+    ["/documents/document-1", "Workspace page"],
+    ["/knowledge?business_entity_id=entity-1", "Workspace page"],
+    ["/verification", "Workspace page"],
   ])("resolves %s inside the workspace shell", (path, heading) => {
     renderAt(path);
 

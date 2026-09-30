@@ -262,6 +262,10 @@ class PrivacyService:
             self.db.flush()
             return result
 
+        from app.modules.cwi.services.source_proposal_service import discard_unapproved
+        discard_unapproved(self.db, org_id, "email", record_ids_resolved)
+        discard_unapproved(self.db, org_id, "source", source_item_ids)
+
         # 1) Delete dependent AI task suggestions (FK on email_message_record_id
         #    and source_item_id). These are suggestions/negative signals, not
         #    confirmed business memory.

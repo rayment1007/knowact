@@ -100,12 +100,15 @@ class IngestionService:
 
         self.db.add(item)
         self.db.flush()
+        self.audit.record(org_id=org_id, actor_id=user_id, action_type="CREATE_SOURCE_ITEM",
+            target_type="SourceItem", target_id=item.id, detail={})
         return item
 
     def list_inbox(
         self,
         org_id: UUID,
         filters: InboxFilter | None = None,
+        review_user_id: UUID | None = None,
     ) -> list[SourceItem]:
         """Return the organization's source items, newest first.
 
@@ -129,6 +132,16 @@ class IngestionService:
         filters = filters or InboxFilter()
 
         stmt = scope_select(select(SourceItem), SourceItem, org_id)
+        if filters.review_pending:
+            stmt = stmt.where(
+                SourceItem.status.notin_([SourceStatus.ARCHIVED, SourceStatus.DISMISSED]),
+                select(ClassificationResult.id).where(
+                    ClassificationResult.source_item_id == SourceItem.id,
+                    ClassificationResult.status == SuggestionStatus.SUGGESTED,
+                ).exists(),
+            )
+            if review_user_id is not None:
+                stmt = stmt.where(SourceItem.created_by == review_user_id)
         if filters.status is not None:
             stmt = stmt.where(SourceItem.status == filters.status)
         if filters.business_category is not None:
@@ -245,6 +258,13 @@ class IngestionService:
         """
 
         item = self.get(org_id, item_id)
+
+        from app.modules.cwi.models import EmailMessageRecord
+        from app.modules.cwi.services.source_proposal_service import discard_unapproved
+        discard_unapproved(self.db, org_id, "source", [item.id])
+        email_ids = list(self.db.scalars(select(EmailMessageRecord.id).where(
+            EmailMessageRecord.organization_id == org_id, EmailMessageRecord.source_item_id == item.id)))
+        discard_unapproved(self.db, org_id, "email", email_ids)
 
         # Classification results only exist for this source item; delete them.
         self.db.execute(

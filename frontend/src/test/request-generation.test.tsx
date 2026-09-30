@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -56,7 +57,7 @@ describe("latest request wins", () => {
         : slowRequest.promise,
     );
 
-    render(<SourceInboxPage />);
+    render(<MemoryRouter><SourceInboxPage /></MemoryRouter>);
     await user.selectOptions(screen.getByLabelText("Status"), "NEW");
 
     expect(await screen.findByText("Fast current item")).toBeInTheDocument();

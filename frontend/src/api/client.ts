@@ -6,6 +6,8 @@
 // stored) on both same-origin (Vite proxy) and cross-origin calls. Client
 // JavaScript never reads or handles the token directly.
 
+import { cachedGet, canCache, cacheSession, clearApiCache, invalidateApiCache, mutationDependencies } from "./cache";
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api";
 
 // The auth store registers a callback here so the client can react to 401
@@ -50,6 +52,14 @@ export async function apiRequest<T>(
   path: string,
   options: RequestOptions = {},
 ): Promise<T> {
+  if ((options.method ?? "GET") === "GET" && canCache(path) && options.cache !== "no-store") {
+    return cachedGet(path, () => requestJson<T>(path, { ...options, signal: undefined }), options.signal);
+  }
+  return requestJson<T>(path, options);
+}
+
+async function requestJson<T>(path: string, options: RequestOptions): Promise<T> {
+  const session = cacheSession();
   const { body, headers, skipAuthRedirect, ...rest } = options;
 
   const finalHeaders = new Headers(headers);
@@ -74,9 +84,12 @@ export async function apiRequest<T>(
   const data = isJson ? await response.json().catch(() => undefined) : undefined;
 
   if (!response.ok) {
-    if (response.status === 401 && !skipAuthRedirect) {
+    if (response.status === 401 && !skipAuthRedirect && session === cacheSession()) {
+      clearApiCache();
       unauthorizedHandler?.();
     }
+    // Sync/processing endpoints can persist their failure status.
+    if (session === cacheSession() && /\/(sync-now|initial-sync|process)$/.test(path)) invalidateApiCache(mutationDependencies(path, options.method));
     throw new ApiError(
       response.status,
       `Request to ${path} failed with status ${response.status}`,
@@ -84,6 +97,9 @@ export async function apiRequest<T>(
     );
   }
 
+  if (session === cacheSession() && !["GET", "HEAD"].includes(options.method ?? "GET")) {
+    invalidateApiCache(mutationDependencies(path, options.method));
+  }
   return data as T;
 }
 
@@ -99,6 +115,7 @@ export async function apiUpload<T>(
   form: FormData,
   options: Omit<RequestOptions, "body"> = {},
 ): Promise<T> {
+  const session = cacheSession();
   const { headers, skipAuthRedirect, ...rest } = options;
 
   const finalHeaders = new Headers(headers);
@@ -120,7 +137,8 @@ export async function apiUpload<T>(
   const data = isJson ? await response.json().catch(() => undefined) : undefined;
 
   if (!response.ok) {
-    if (response.status === 401 && !skipAuthRedirect) {
+    if (response.status === 401 && !skipAuthRedirect && session === cacheSession()) {
+      clearApiCache();
       unauthorizedHandler?.();
     }
     throw new ApiError(
@@ -130,6 +148,7 @@ export async function apiUpload<T>(
     );
   }
 
+  if (session === cacheSession()) invalidateApiCache(mutationDependencies(path, options.method));
   return data as T;
 }
 

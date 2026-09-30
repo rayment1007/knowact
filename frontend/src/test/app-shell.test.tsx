@@ -20,6 +20,9 @@ vi.mock("@/auth", () => ({
   }),
 }));
 
+vi.mock("@/api/integrations", () => ({ integrationsApi: { list: vi.fn().mockResolvedValue([]) } }));
+vi.mock("@/api/workspace", () => ({ workspaceApi: { summary: vi.fn().mockResolvedValue({ documents: 0, documents_pending: 0, documents_failed: 0, notes: 0, knowledge: 0, open_actions: 0 }) } }));
+
 import AppShell from "@/layouts/AppShell";
 
 afterEach(cleanup);
@@ -51,7 +54,16 @@ function renderShell(pathname = "/") {
 }
 
 describe("consolidated workspace shell", () => {
-  it("shows exactly six purpose links in the mobile drawer", async () => {
+  it("places account and logout in the sidebar with compact sync in the header", () => {
+    renderShell();
+    const sidebar = screen.getByRole("complementary", { name: "Main sidebar" });
+    expect(within(sidebar).getByText("Workspace Owner")).toBeInTheDocument();
+    expect(within(sidebar).getByRole("button", { name: "Log out" })).toBeInTheDocument();
+    expect(within(screen.getByRole("banner")).getByRole("button", { name: "Sync status" })).toBeInTheDocument();
+    expect(within(screen.getByRole("banner")).queryByText("Workspace Owner")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Google sync details")).not.toBeInTheDocument();
+  });
+  it("shows exactly two purpose links in the mobile drawer", async () => {
     const user = userEvent.setup();
     renderShell();
 
@@ -65,28 +77,15 @@ describe("consolidated workspace shell", () => {
 
     expect(labels).toEqual([
       "Dashboard",
-      "Sources",
-      "Knowledge",
-      "Actions",
-      "Copilot",
-      "Settings",
+      "Workspace",
     ]);
   });
 
-  it("takes a purpose link to its first page and reveals context tabs", async () => {
+  it("opens Workspace without the old source-type navigation tabs", async () => {
     const user = userEvent.setup();
     renderShell();
-
-    await user.click(screen.getByRole("link", { name: "Sources" }));
-
-    expect(screen.getByLabelText("current path")).toHaveTextContent(
-      "/source-inbox",
-    );
-    const tabs = screen.getByRole("navigation", { name: "Sources pages" });
-    expect(within(tabs).getAllByRole("link").map((link) => link.textContent)).toEqual([
-      "Inbox",
-      "Gmail",
-      "Files",
-    ]);
+    await user.click(screen.getByRole("link", { name: "Workspace" }));
+    expect(screen.getByLabelText("current path")).toHaveTextContent("/workspace/sources");
+    expect(screen.queryByRole("navigation", { name: "Sources pages" })).not.toBeInTheDocument();
   });
 });

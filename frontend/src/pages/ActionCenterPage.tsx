@@ -17,6 +17,8 @@
 // output.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { peekCache } from "@/api/cache";
+import { useQueryRefresh } from "@/hooks/useQueryRefresh";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ApiError,
@@ -388,9 +390,10 @@ export default function ActionCenterPage() {
     calendarLinkId: string;
   }>();
   const navigate = useNavigate();
-  const [actions, setActions] = useState<ActionItem[]>([]);
+  const [actions, setActions] = useState<ActionItem[]>(() => peekCache<ActionItem[]>("/actions") ?? []);
   const [entities, setEntities] = useState<BusinessEntity[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !peekCache("/actions"));
+  const loaded = useRef(!!peekCache("/actions"));
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -530,12 +533,13 @@ export default function ActionCenterPage() {
 
   const loadActions = useCallback(async () => {
     const requestGeneration = ++listRequestGeneration.current;
-    setLoading(true);
+    setLoading(!loaded.current);
     setError(null);
     try {
       const result = await actionsApi.list(filters);
       if (requestGeneration !== listRequestGeneration.current) return;
       setActions(result);
+      loaded.current = true;
     } catch {
       if (requestGeneration !== listRequestGeneration.current) return;
       setError("Could not load actions. Please retry.");
@@ -545,6 +549,9 @@ export default function ActionCenterPage() {
       }
     }
   }, [filters]);
+
+  useQueryRefresh("/actions", loadActions);
+  useQueryRefresh("/calendar", loadOpenedDetail);
 
   useEffect(() => {
     void loadActions();
@@ -578,7 +585,7 @@ export default function ActionCenterPage() {
   const handleCreated = useCallback((created: ActionItem) => {
     // Prepend so the newest action is visible; the next filtered reload will
     // reconcile it against any active filters.
-    setActions((current) => [created, ...current]);
+    setActions((current) => [created, ...current.filter(item => item.id !== created.id)]);
   }, []);
 
   const handleDelete = useCallback(
