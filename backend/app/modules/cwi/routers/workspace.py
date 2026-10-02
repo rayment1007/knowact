@@ -130,6 +130,7 @@ def summary(db: Session = Depends(get_db), user: User = Depends(get_current_user
 # Only expose known workspace operations, never raw audit detail (which can
 # contain privacy-sensitive payloads). Deleted targets intentionally have no link.
 _ACTIVITY_LABELS = {
+    "DELETE_CALENDAR_SOURCE": "Calendar source removed",
     "CREATE_SOURCE_ITEM": "Source added", "DELETE_SOURCE_ITEM": "Source deleted",
     "CONFIRM_CLASSIFICATION": "Source classification confirmed",
     "CONFIRM_KNOWLEDGE": "Knowledge confirmed", "DELETE_KNOWLEDGE": "Knowledge deleted",
@@ -137,6 +138,7 @@ _ACTIVITY_LABELS = {
     "UPLOAD_DOCUMENT": "Document uploaded", "PROCESS_DOCUMENT": "Document processed", "DELETE_DOCUMENT": "Document deleted",
 }
 _ACTIVITY_TARGETS = {
+    "CalendarSource": (CalendarSource, "title", "/calendar-sources/"),
     "SourceItem": (SourceItem, "title", "/source-inbox/"),
     "KnowledgeItem": (KnowledgeItem, "summary", "/knowledge/"),
     "ActionItem": (ActionItem, "title", "/actions/"),
@@ -165,10 +167,12 @@ def activity(
             target_query = target_query.where(SourceItem.created_by == user.id)
         elif model is DocumentAsset:
             target_query = target_query.where(DocumentAsset.uploaded_by == user.id, DocumentAsset.source_deleted.is_(False))
+        elif model is CalendarSource:
+            target_query = target_query.join(IntegrationConnection).where(IntegrationConnection.user_id == user.id)
         target = db.scalar(target_query)
         items.append({
             "id": row.id, "label": _ACTIVITY_LABELS[row.action_type],
-            "title": getattr(target, title_field) if target else "Item no longer available",
+            "title": getattr(target, title_field) if target else ("Item deleted. Activity record only." if row.action_type.startswith("DELETE_") else "Item no longer available"),
             "path": path_root + str(target.id) if target else None,
             "created_at": row.created_at,
         })

@@ -77,7 +77,7 @@ from app.modules.cwi.schemas import InitialSyncOptions
 from app.modules.cwi.services.gmail_client import GmailClient, GmailMessage, GmailClientError
 from app.modules.cwi.services.google_oauth import GMAIL_READONLY_SCOPE, GoogleOAuthError
 from app.modules.cwi.services.integration_service import IntegrationService
-from app.modules.cwi.services.sync_preferences import preferences, exclusion_query
+from app.modules.cwi.services.sync_preferences import preferences
 
 # Relevance values whose content is noise: excluded from knowledge and from
 # task-suggestion extraction (mirrors the KnowledgeService privacy gate).
@@ -301,9 +301,6 @@ class GmailSyncService:
            :class:`EmailTaskSuggestion` (Requirement 27.6).
         """
 
-        if self.db.scalar(exclusion_query(connection, message.gmail_message_id)) is not None:
-            run.skipped_ineligible += 1
-            return None
         if self.db.scalar(select(EmailMessageRecord.id).where(
             EmailMessageRecord.organization_id == org_id,
             EmailMessageRecord.integration_connection_id == connection.id,
@@ -827,8 +824,8 @@ class GmailSyncService:
         that reference it (their ``email_message_record_id`` FK is non-nullable,
         so they must go first), deletes the record, and records exactly one
         ``DELETE_EMAIL_MESSAGE`` audit row. The derived ``SourceItem`` (if any)
-        is deleted too; approved knowledge/actions are retained. A minimal
-        deletion marker prevents the same provider message from returning.
+        is deleted too; approved knowledge/actions are retained. A later sync
+        can import the original again if it falls within the saved sync range.
 
         Args:
             org_id: The tenant the record must belong to.

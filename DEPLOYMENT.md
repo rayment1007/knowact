@@ -39,9 +39,9 @@ releasing this Workspace version:
 - Settings stores the user's sync window: Gmail defaults to the past 7 days;
   Calendar defaults to the past 7 and next 90 days. Login and Sync Now use it.
   Narrowing the window does not delete previously saved records.
-- Deleting imported email now saves an account-scoped, hashed exclusion marker.
-  Future sync skips it until the user restores excluded imports in Settings.
-  Emails deleted before this migration have no exclusion marker.
+- Removing imported email or calendar sources only removes the KnowAct copy.
+  The original stays in Google and may return on a later sync within the saved
+  range. Legacy email exclusion markers are no longer applied.
 - Manual sources and project groups have deletion controls. Removing a group
   unlinks its records rather than deleting knowledge or actions.
 - Approved Calendar writes and explicitly sent Gmail drafts are matched by

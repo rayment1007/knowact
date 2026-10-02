@@ -18,6 +18,7 @@ import type {
 } from "./types";
 
 export const calendarApi = {
+  removeSource: (sourceId: string) => api.del<void>(`/calendar/sources/${sourceId}`),
   /** List the writable calendars for a connection (Requirement 28.3). */
   listCalendars: (connectionId: string) =>
     api.get<CalendarView[]>(`/calendar/${connectionId}/calendars`),

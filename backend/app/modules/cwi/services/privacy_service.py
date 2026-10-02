@@ -239,11 +239,9 @@ class PrivacyService:
         )
         result = EmailDeletionResult()
         record_ids_resolved = [record.id for record in records]
-        from app.modules.cwi.services.sync_preferences import exclude_email
         for record in records:
             connection = self.db.scalar(select(IntegrationConnection).where(
                 IntegrationConnection.id == record.integration_connection_id).with_for_update())
-            exclude_email(self.db, connection, record.gmail_message_id)
         source_item_ids = [
             record.source_item_id
             for record in records

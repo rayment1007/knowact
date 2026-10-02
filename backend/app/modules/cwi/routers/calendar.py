@@ -49,6 +49,29 @@ from app.modules.cwi.services.integration_service import IntegrationService
 router = APIRouter(tags=["calendar"])
 
 
+@router.delete("/calendar/sources/{source_id}", status_code=204)
+def remove_calendar_source(source_id: UUID, db: Session = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    """Remove only the captured source; a later sync may import it again."""
+    from sqlalchemy import select
+    from app.modules.cwi.models import IntegrationConnection
+    from app.modules.cwi.services.workspace_sources import _source
+    from app.modules.cwi.services.source_proposal_service import discard_unapproved
+    from app.core.services.audit_service import AuditService
+
+    row, _ = _source(db, user, "calendar", source_id)
+    db.execute(select(IntegrationConnection).where(
+        IntegrationConnection.id == row.integration_connection_id,
+        IntegrationConnection.organization_id == user.organization_id,
+        IntegrationConnection.user_id == user.id).with_for_update()).scalar_one()
+    discard_unapproved(db, user.organization_id, "calendar", [row.id])
+    db.delete(row)
+    AuditService(db).record(org_id=user.organization_id, actor_id=user.id,
+        action_type="DELETE_CALENDAR_SOURCE", target_type="CalendarSource",
+        target_id=source_id, detail={})
+    db.flush()
+
+
 def _service(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),

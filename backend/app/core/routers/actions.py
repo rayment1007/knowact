@@ -138,9 +138,9 @@ def delete_action(
     organization_id: UUID = Depends(get_current_organization_id),
     user: User = Depends(get_current_user),
 ) -> Response:
-    """Permanently delete an action item and its calendar links (Requirement 2.3).
+    """Permanently delete an action item (Requirement 2.3).
 
-    Deletes any Google Calendar event links for the action and writes one
+    Unlinks independent Google Calendar events from the action and writes one
     ``DELETE_ACTION`` audit row in the same transaction. A non-existent or
     cross-tenant id yields ``404``.
     """

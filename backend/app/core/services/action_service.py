@@ -32,7 +32,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete as sa_delete
+from sqlalchemy import update as sa_update
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -379,11 +379,11 @@ class ActionService:
     # -- Delete -------------------------------------------------------------
 
     def delete(self, org_id: UUID, action_id: UUID, actor_id: UUID) -> None:
-        """Permanently delete an action item and its calendar links.
+        """Permanently delete an action while preserving independent calendar events.
 
         Resolves the org-scoped action (``404`` if missing/cross-tenant) and, in
-        one transaction, deletes any CWI ``CalendarEventLink`` rows for the
-        action (so the FK from the link to the action never blocks the delete),
+        one transaction, unlinks CWI ``CalendarEventLink`` rows from the
+        action (so its Google event remains independently manageable),
         deletes the action, and records exactly one ``DELETE_ACTION`` audit row.
         The CWI model is imported lazily so this core service carries no
         module-load dependency on the CWI layer.
@@ -402,10 +402,10 @@ class ActionService:
         from app.modules.cwi.models import CalendarEventLink
 
         self.db.execute(
-            sa_delete(CalendarEventLink).where(
+            sa_update(CalendarEventLink).where(
                 CalendarEventLink.organization_id == org_id,
                 CalendarEventLink.action_item_id == action.id,
-            )
+            ).values(action_item_id=None)
         )
 
         deleted_id = action.id

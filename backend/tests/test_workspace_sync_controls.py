@@ -29,7 +29,7 @@ def message(key, days=0):
         received_at=datetime.now(timezone.utc) - timedelta(days=days), labels=["INBOX"])
 
 
-def test_default_and_custom_window_deletion_resync_restore(client, db_session, seeded_user):
+def test_default_and_custom_window_deletion_allows_resync(client, db_session, seeded_user):
     _login(client, seeded_user); user = seeded_user["user"]
     assert client.get("/api/workspace/sync-preferences").json() == {"email_days": 7, "calendar_past_days": 7, "calendar_future_days": 90}
     conn = connection(db_session, user)
@@ -44,13 +44,16 @@ def test_default_and_custom_window_deletion_resync_restore(client, db_session, s
     db_session.expire_all()
     assert db_session.get(SourceItem, source_id) is None
     assert db_session.get(KnowledgeItem, kept.id).source_item_id is None
-    assert service.sync_now(user.organization_id, user.id, conn.id).records_created == 0
+    # Existing exclusions from the previous release must not block reimport.
+    from app.modules.cwi.services.sync_preferences import exclude_email
+    exclude_email(db_session, conn, "recent")
+    assert service.sync_now(user.organization_id, user.id, conn.id).records_created == 1
     assert client.get("/api/workspace/sync-exclusions").json() == {"count": 1}
     changed = client.put("/api/workspace/sync-preferences", json={"email_days": 30, "calendar_past_days": 3, "calendar_future_days": 120})
     assert changed.status_code == 200
     assert service.sync_now(user.organization_id, user.id, conn.id).records_created == 1  # older only
     assert client.delete("/api/workspace/sync-exclusions").status_code == 200
-    assert service.sync_now(user.organization_id, user.id, conn.id).records_created == 1  # restored recent
+    assert service.sync_now(user.organization_id, user.id, conn.id).records_created == 0  # already reimported
     assert client.put("/api/workspace/sync-preferences", json={"email_days": 0}).status_code == 422
     assert client.put("/api/workspace/sync-preferences", json={"email_days": 366}).status_code == 422
 
