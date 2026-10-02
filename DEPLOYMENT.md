@@ -11,7 +11,7 @@ releasing this Workspace version:
 1. Run the frontend build and the affected backend/frontend tests. Review
    `git diff` and stage the application files deliberately; keep `.env`, local
    uploads, generated code dumps, and unrelated coursework out of the commit.
-2. Include migrations `0011_calendar_sources` and `0012_source_proposals` in the
+2. Include migrations through `0013_sync_preferences` in the
    release. Render's configured start command runs `alembic upgrade head`; do not
    rerun the initial seed against an existing database. A local migration against
    the same Neon database already changes that shared database, but does not
@@ -33,6 +33,24 @@ releasing this Workspace version:
 6. Check sync timestamps, open an original source, generate/edit/approve one
    source draft, follow its evidence link, and ask Copilot about today's tasks.
    A build or health check alone does not verify those authenticated workflows.
+
+### Sync and review release
+
+- Settings stores the user's sync window: Gmail defaults to the past 7 days;
+  Calendar defaults to the past 7 and next 90 days. Login and Sync Now use it.
+  Narrowing the window does not delete previously saved records.
+- Deleting imported email now saves an account-scoped, hashed exclusion marker.
+  Future sync skips it until the user restores excluded imports in Settings.
+  Emails deleted before this migration have no exclusion marker.
+- Manual sources and project groups have deletion controls. Removing a group
+  unlinks its records rather than deleting knowledge or actions.
+- Approved Calendar writes and explicitly sent Gmail drafts are matched by
+  provider ID, so later imports do not create a second review requirement.
+- Keep `TOKEN_ENCRYPTION_KEY` consistent across environments sharing the same
+  database. A different key cannot decrypt existing Google connection tokens;
+  reconnecting from that environment would replace tokens used by the other one.
+- The existing owner email allowlist remains enabled. This release does not
+  open public registration or change Google consent permissions.
 
 ## Why the Vercel proxy matters
 

@@ -158,6 +158,9 @@ def test_calendar_create_idempotency(
             google_calendar_id=calendar_id,
             summary=summary or None,
             all_day=all_day,
+            all_day_date="2026-10-09",
+            start=datetime(2026, 10, 9, 9, tzinfo=timezone.utc),
+            end=datetime(2026, 10, 9, 10, tzinfo=timezone.utc),
         )
         service.add_action_to_calendar(org_id, user_id, action.id, req)
 

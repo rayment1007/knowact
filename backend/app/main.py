@@ -15,6 +15,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import Settings, get_settings
 
@@ -83,6 +84,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title=settings.app_name,
         version="0.1.0",
     )
+
+    from app.modules.cwi.services.token_vault import TokenVaultError
+
+    @app.exception_handler(TokenVaultError)
+    async def token_configuration_error(_request: Request, _error: TokenVaultError):
+        # A local server may use a different key from the server that saved
+        # these tokens. Do not mark a shared connection expired or replace it.
+        return JSONResponse(status_code=503, content={"detail":
+            "This server cannot read the saved Google connection. Its encryption configuration needs to be checked. Your saved workspace data is still available."})
 
     # CORS: allow the Vite dev origin. ``allow_credentials=True`` is required so
     # the browser will send/store the HTTP-only auth cookie on API calls.

@@ -27,6 +27,7 @@ export interface WorkspaceCounts {
 export interface SourceDetail {
   id: string; kind: SourceKind; title: string; source: SourceItem | null;
   document: DocumentAsset | null; raw_content: string | null;
+  created_from?: { label: string; path: string } | null;
   metadata: { sender?: string; recipients?: string[]; received_at?: string; gmail_message_id?: string;
     starts_at?: string; ends_at?: string; location?: string; html_link?: string };
 }

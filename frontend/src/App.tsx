@@ -3,6 +3,7 @@ import { ProtectedRoute } from "@/auth";
 import AppShell from "@/layouts/AppShell";
 import { useLocation } from "react-router-dom";
 import SettingsPage from "@/pages/SettingsPage";
+import ReviewsPage from "@/pages/ReviewsPage";
 import SearchPage from "@/pages/SearchPage";
 import WorkspacePage, { LegacyWorkspaceRedirect } from "@/pages/WorkspacePage";
 import WorkspaceActivityPage from "@/pages/WorkspaceActivityPage";
@@ -32,6 +33,7 @@ export default function App() {
           <Route path="source-inbox/:sourceId" element={<LegacyWorkspaceRedirect />} />
           <Route path="search" element={<SearchPage />} />
           <Route path="activity" element={<WorkspaceActivityPage />} />
+          <Route path="reviews" element={<ReviewsPage />} />
           <Route path="calendar-sources" element={<LegacyWorkspaceRedirect />} />
           <Route path="calendar-sources/:sourceId" element={<LegacyWorkspaceRedirect />} />
           <Route path="settings" element={<SettingsPage />} />

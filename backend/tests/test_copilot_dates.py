@@ -15,6 +15,18 @@ class FixedDatetime(datetime):
         return datetime(2026, 9, 30, 17, 0, tzinfo=timezone.utc).astimezone(tz)
 
 
+def test_reply_status_is_not_inferred_from_notifications_or_tasks(cwi_client, seeded_user, monkeypatch):
+    _login(cwi_client, seeded_user)
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Do not ask an LLM to guess reply state")
+    monkeypatch.setattr(module.CopilotService, "_gather_evidence", unexpected)
+    result = cwi_client.post("/api/copilot/ask", json={"question": "Which important emails still need a reply?"})
+    assert result.status_code == 200
+    assert "reply status are not tracked" in result.json()["answer"]
+    assert result.json()["citations"] == []
+    assert result.json()["suggested_artifact"] is None
+
+
 def test_today_uses_user_day_and_real_due_dates_without_promoting_old_email(cwi_client, db_session, seeded_user, monkeypatch):
     monkeypatch.setattr(module, "datetime", FixedDatetime)
     _login(cwi_client, seeded_user)

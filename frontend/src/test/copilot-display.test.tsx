@@ -39,6 +39,15 @@ function mountChat() {
 }
 
 describe("Copilot readable references and conversation", () => {
+  it("renders emphasis and lists, replaces ID labels, and keeps model HTML inert", () => {
+    const { container } = render(<MemoryRouter><AnswerText answer={'1. **Review draft** — Check this.\n- **ID**: [1]\n\n2. **Next item**\n<script>alert(1)</script>'} citations={[citation]} /></MemoryRouter>);
+    expect(container.querySelector("strong")?.textContent).toBe("Review draft");
+    expect(container.querySelectorAll("li")).toHaveLength(2);
+    expect(container.textContent).not.toContain("**");
+    expect(container.textContent).not.toContain("ID:");
+    expect(container.querySelector("script")).toBeNull();
+    expect(screen.getByRole("link", { name: "Source 1: Review draft" })).toHaveAttribute("href", citation.deep_link);
+  });
   it("links validated citations and hides IDs from legacy answer text", () => {
     const { container } = render(<MemoryRouter><AnswerText
       answer={`Review this (id=${citation.source_id}). Also [8].`} citations={[citation]}

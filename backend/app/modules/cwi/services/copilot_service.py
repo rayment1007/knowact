@@ -204,7 +204,8 @@ def _answer_references(answer, citations):
         return answer
     numbers = {str(c.source_id): str(index + 1) for index, c in enumerate(citations)}
     pattern = r"\(?(?:id\s*[:=]\s*)?([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\)?"
-    return re.sub(pattern, lambda match: f"[{numbers[match.group(1).lower()]}]" if match.group(1).lower() in numbers else "[unverified source]", answer, flags=re.I)
+    text = re.sub(pattern, lambda match: f"[{numbers[match.group(1).lower()]}]" if match.group(1).lower() in numbers else "[unverified source]", answer, flags=re.I)
+    return re.sub(r"\n\s*[-*]?\s*(?:\*\*)?ID(?:\*\*)?\s*:\s*(\[\d+\])", r" \1", text, flags=re.I)
 
 
 class CopilotService:
@@ -579,6 +580,13 @@ class CopilotService:
 
         self.request_now = datetime.now(timezone(timedelta(minutes=getattr(req, "utc_offset_minutes", 0))))
         if intent == CopilotIntent.ASK:
+            question = req.question.casefold()
+            if any(phrase in question for phrase in ("need a reply", "needs a reply", "need replies", "unanswered email", "haven't replied", "have not replied", "awaiting my reply", "需要回复", "还没回复", "未回复")):
+                response = CopilotResponse(
+                    answer="I can't reliably tell which emails still need your reply from the saved workspace data. Complete thread history and reply status are not tracked yet. A security alert, account notification, or unread message does not by itself require a reply. Open the original conversation in Gmail to check; you can then ask me to help draft a reply to a specific email.",
+                    citations=[], insufficient_evidence=False, suggested_artifact=None, intent=intent.value)
+                self._log_answer(org_id, user_id, req.question, response, [])
+                return response
             daily_response = self._daily_attention(org_id, user_id, req.question, self.request_now)
             if daily_response is not None:
                 return daily_response

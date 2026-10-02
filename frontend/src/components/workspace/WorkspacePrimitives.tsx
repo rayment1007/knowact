@@ -4,7 +4,7 @@ import WorkspaceIcon from "@/components/WorkspaceIcon";
 export const buttonClass = "inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50";
 export const primaryClass = "inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 disabled:opacity-50";
 export const inputClass = "w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500";
-const labels: Record<string, string> = {
+const labels: Record<string, string> = { CREATED_HERE: "Created in KnowAct",
   NEEDS_REVIEW: "Review classification", SUGGESTED: "Needs review", RAW: "Original source",
   REVIEWED: "Classification reviewed", UPLOADED: "Ready to process", PROCESSING: "Processing", FAILED: "Processing failed",
   INDEXED: "Searchable", OPEN: "Open", IN_PROGRESS: "In progress", DONE: "Done", CANCELLED: "Cancelled",

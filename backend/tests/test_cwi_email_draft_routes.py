@@ -413,6 +413,23 @@ def test_send_is_idempotent(
     assert len(audits) == 1
 
 
+def test_confirmed_send_is_not_undone_by_local_snapshot_error(cwi_client, seeded_user, fake_gmail, monkeypatch):
+    from sqlalchemy.exc import SQLAlchemyError
+    from app.modules.cwi.services.gmail_sync_service import GmailSyncService
+    _login(cwi_client, seeded_user)
+    connection_id = _connect_gmail(cwi_client)
+    draft_id = _request_draft(cwi_client, connection_id)["id"]
+    cwi_client.post(f"/api/email-drafts/{draft_id}/approve")
+    def failed_snapshot(*args, **kwargs):
+        raise SQLAlchemyError("snapshot failed")
+    monkeypatch.setattr(GmailSyncService, "_ingest_message_race_safe", failed_snapshot)
+    for _ in range(2):
+        response = cwi_client.post(f"/api/email-drafts/{draft_id}/send", json={"confirm": True})
+        assert response.status_code == 200
+        assert response.json()["status"] == "SENT"
+    assert fake_gmail.send_calls == 1
+
+
 def test_send_failure_persists_failed_status(
     cwi_client: TestClient,
     seeded_user: dict[str, Any],

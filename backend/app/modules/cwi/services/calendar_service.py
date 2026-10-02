@@ -39,7 +39,8 @@ deterministic fake and no real Calendar call ever occurs (Requirement 34).
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -258,6 +259,11 @@ class CalendarService:
     # -- Event payload building ---------------------------------------------
 
     def sync_sources(self, org_id: UUID, user_id: UUID, connection_id: UUID) -> int:
+        from app.modules.cwi.services.sync_preferences import preferences
+        window = preferences(self.db, org_id, user_id)
+        now = datetime.now(timezone.utc)
+        time_min = now - timedelta(days=window.calendar_past_days)
+        time_max = now + timedelta(days=window.calendar_future_days)
         connection = self._get_connection(org_id, connection_id, user_id)
         # Serialize snapshots per connection, including requests from other tabs.
         self.db.execute(select(IntegrationConnection).where(
@@ -265,7 +271,7 @@ class CalendarService:
         ).with_for_update()).scalar_one()
         try:
             token = self._access_token(org_id, user_id, connection_id)
-            events = self.calendar.list_events(access_token=token)
+            events = self.calendar.list_events(access_token=token, time_min=time_min, time_max=time_max)
         except (CalendarClientError, GoogleOAuthError):
             connection.last_error = "Calendar sync failed. Please retry or reconnect."
             self.db.flush()
@@ -275,6 +281,7 @@ class CalendarService:
             select(CalendarSource).where(
                 CalendarSource.organization_id == org_id,
                 CalendarSource.integration_connection_id == connection_id,
+                CalendarSource.google_calendar_id.in_(["primary", connection.account_email]),
             )
         )}
         seen = set()
@@ -304,7 +311,7 @@ class CalendarService:
                 row.updated_at = now
         # Remove local snapshots only after the entire provider read succeeds.
         for event_id, row in existing.items():
-            if event_id not in seen:
+            if event_id not in seen and self._in_window(row, time_min, time_max):
                 from app.modules.cwi.services.source_proposal_service import discard_unapproved
                 discard_unapproved(self.db, org_id, "calendar", [row.id])
                 self.db.delete(row)
@@ -312,6 +319,49 @@ class CalendarService:
         connection.last_error = None
         self.db.flush()
         return len(seen)
+
+    @staticmethod
+    def _in_window(row, time_min, time_max):
+        try:
+            start = datetime.fromisoformat(row.starts_at.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(row.ends_at.replace("Z", "+00:00"))
+            return (end.replace(tzinfo=timezone.utc) if end.tzinfo is None else end) > time_min and (start.replace(tzinfo=timezone.utc) if start.tzinfo is None else start) < time_max
+        except ValueError:
+            return False
+
+    def _save_created_source(self, link, event):
+        """Reflect an explicitly approved Calendar write immediately, by provider ID."""
+        from app.modules.cwi.services.calendar_client import _event_body
+        body = _event_body(event)
+        row = self.db.scalar(select(CalendarSource).where(
+            CalendarSource.organization_id == link.organization_id,
+            CalendarSource.integration_connection_id == link.integration_connection_id,
+            CalendarSource.google_event_id == link.google_event_id))
+        if row is None:
+            row = CalendarSource(organization_id=link.organization_id,
+                integration_connection_id=link.integration_connection_id,
+                google_event_id=link.google_event_id)
+            self.db.add(row)
+        row.google_calendar_id = link.google_calendar_id
+        row.title, row.description = event.summary, event.description
+        row.location = row.location or ""
+        row.starts_at = body["start"].get("date") or body["start"].get("dateTime", "")
+        row.ends_at = body["end"].get("date") or body["end"].get("dateTime", "")
+        row.html_link = row.html_link or ""
+        row.updated_at = datetime.now(timezone.utc)
+        self.db.flush()
+
+    @staticmethod
+    def _validate_event_times(req, all_day_date):
+        if req.all_day:
+            if not all_day_date:
+                raise HTTPException(422, detail="Choose a date for the all-day event.")
+        elif req.start is None or req.end is None:
+            raise HTTPException(422, detail="Choose a start and end time.")
+        elif req.start.tzinfo is None or req.end.tzinfo is None:
+            raise HTTPException(422, detail="Event times must include a time zone.")
+        elif req.end <= req.start:
+            raise HTTPException(422, detail="The end time must be after the start time.")
 
     def _event_from_action(
         self, action: ActionItem, req: CalendarAddRequest
@@ -330,9 +380,10 @@ class CalendarService:
             if req.description is not None
             else (action.description or "")
         )
-        all_day_date = req.all_day_date
+        all_day_date = req.all_day_date.isoformat() if req.all_day_date else None
         if req.all_day and all_day_date is None and action.due_date is not None:
             all_day_date = action.due_date.isoformat()
+        self._validate_event_times(req, all_day_date)
         return CalendarEventInput(
             summary=summary,
             description=description or "",
@@ -346,11 +397,23 @@ class CalendarService:
     def _event_from_update(
         self, link: CalendarEventLink, action: ActionItem | None, req: CalendarUpdateRequest
     ) -> CalendarEventInput:
+        # PATCH without dates preserves the last acknowledged schedule.
+        if not {"start", "end", "all_day", "all_day_date"}.intersection(req.model_fields_set):
+            saved = self.db.scalar(select(CalendarSource).where(
+                CalendarSource.organization_id == link.organization_id,
+                CalendarSource.integration_connection_id == link.integration_connection_id,
+                CalendarSource.google_event_id == link.google_event_id))
+            if saved and saved.starts_at and saved.ends_at:
+                if len(saved.starts_at) == 10:
+                    from datetime import date
+                    req = req.model_copy(update={"all_day": True, "all_day_date": date.fromisoformat(saved.starts_at)})
+                else:
+                    req = req.model_copy(update={"start": datetime.fromisoformat(saved.starts_at), "end": datetime.fromisoformat(saved.ends_at)})
         summary = (req.summary or (action.title if action else None) or "Action").strip()
         description = req.description if req.description is not None else (
             action.description if action and action.description else ""
         )
-        all_day_date = req.all_day_date
+        all_day_date = req.all_day_date.isoformat() if req.all_day_date else None
         if (
             req.all_day
             and all_day_date is None
@@ -358,6 +421,7 @@ class CalendarService:
             and action.due_date is not None
         ):
             all_day_date = action.due_date.isoformat()
+        self._validate_event_times(req, all_day_date)
         return CalendarEventInput(
             summary=summary or "Action",
             description=description or "",
@@ -465,6 +529,8 @@ class CalendarService:
         external event was created), leaving it retriable.
         """
 
+        link.pending_event_json = {key: value.isoformat() if isinstance(value, datetime) else value for key, value in asdict(event).items()}
+        self.db.flush()
         try:
             token = self._access_token(org_id, user_id, connection_id)
             event_id = self.calendar.create_event(
@@ -487,6 +553,7 @@ class CalendarService:
         self.db.add(link)
         self.db.flush()
 
+        self._save_created_source(link, event)
         self.audit.record(
             org_id=org_id,
             actor_id=user_id,
@@ -531,6 +598,7 @@ class CalendarService:
             else None
         )
         event = self._event_from_update(link, action, req)
+        link.pending_event_json = {key: value.isoformat() if isinstance(value, datetime) else value for key, value in asdict(event).items()}
 
         link.sync_status = CalendarSyncStatus.UPDATE_PENDING
         self.db.add(link)
@@ -559,6 +627,7 @@ class CalendarService:
         self.db.add(link)
         self.db.flush()
 
+        self._save_created_source(link, event)
         self.audit.record(
             org_id=org_id,
             actor_id=user_id,
@@ -621,6 +690,14 @@ class CalendarService:
             return link
 
         link.sync_status = CalendarSyncStatus.CANCELLED
+        snapshot = self.db.scalar(select(CalendarSource).where(
+            CalendarSource.organization_id == org_id,
+            CalendarSource.integration_connection_id == link.integration_connection_id,
+            CalendarSource.google_event_id == link.google_event_id))
+        if snapshot is not None:
+            from app.modules.cwi.services.source_proposal_service import discard_unapproved
+            discard_unapproved(self.db, org_id, "calendar", [snapshot.id])
+            self.db.delete(snapshot)
         link.last_synced_at = datetime.now(timezone.utc)
         link.last_error = None
         self.db.add(link)
@@ -665,16 +742,13 @@ class CalendarService:
             return link
 
         if link.google_event_id is None:
-            # Retry the create using the same stable idempotency key.
-            action = (
-                self._get_action(org_id, link.action_item_id)
-                if link.action_item_id is not None
-                else None
-            )
-            event = CalendarEventInput(
-                summary=(action.title if action else "Daily Brief") or "Action",
-                description=(action.description if action and action.description else ""),
-            )
+            if not link.pending_event_json:
+                raise _conflict("Please reopen Add to Calendar and choose the event date again.")
+            values = dict(link.pending_event_json)
+            for key in ("start", "end"):
+                if values.get(key):
+                    values[key] = datetime.fromisoformat(values[key])
+            event = CalendarEventInput(**values)
             link.sync_status = CalendarSyncStatus.PENDING
             self.db.add(link)
             self.db.flush()
@@ -682,9 +756,9 @@ class CalendarService:
                 org_id, user_id, link, link.integration_connection_id, event
             )
 
-        # An event exists: retry as an update using the current action fields.
+        values = {key: value for key, value in (link.pending_event_json or {}).items() if key in CalendarUpdateRequest.model_fields}
         return self.update_event(
-            org_id, user_id, link_id, CalendarUpdateRequest()
+            org_id, user_id, link_id, CalendarUpdateRequest(**values)
         )
 
     def create_daily_brief_block(

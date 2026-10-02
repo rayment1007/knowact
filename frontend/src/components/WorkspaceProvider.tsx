@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { invalidateApiCache, matchesPaths, subscribeCacheInvalidation } from "@/api/cache";
 import { gmailApi, integrationsApi, type IntegrationConnection } from "@/api";
 import { workspaceApi, type WorkspaceSummary } from "@/api/workspace";
+import { getErrorMessage } from "@/api/errors";
 
 interface WorkspaceState {
   connections: IntegrationConnection[]; summary: WorkspaceSummary | null;
@@ -53,8 +54,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         try {
           if (connection.service === "GMAIL") await gmailApi.syncNow(connection.id);
           else if (connection.service === "GOOGLE_CALENDAR") await workspaceApi.syncCalendar(connection.id);
-        } catch {
-          setFailures(previous => ({ ...previous, [connection.id]: "Sync failed. Retry or reconnect in Settings." }));
+        } catch (error) {
+          setFailures(previous => ({ ...previous, [connection.id]: getErrorMessage(error, "Sync failed. Retry or check Settings.") }));
         }
       }));
     } catch {

@@ -114,6 +114,7 @@ class GmailClient(Protocol):
         access_token: str,
         label_ids: list[str] | None = None,
         max_results: int = 100,
+        after: datetime | None = None,
     ) -> list[GmailMessage]:
         """Return messages for the authorized mailbox (newest first)."""
 
@@ -186,9 +187,12 @@ class FakeGmailClient:
         access_token: str,
         label_ids: list[str] | None = None,
         max_results: int = 100,
+        after: datetime | None = None,
     ) -> list[GmailMessage]:
         self.list_calls += 1
         messages = self._messages
+        if after is not None:
+            messages = [m for m in messages if (m.received_at.replace(tzinfo=timezone.utc) if m.received_at.tzinfo is None else m.received_at) >= after]
         if label_ids:
             wanted = set(label_ids)
             messages = [
@@ -409,6 +413,7 @@ class HttpGmailClient:
         access_token: str,
         label_ids: list[str] | None = None,
         max_results: int = 100,
+        after: datetime | None = None,
     ) -> list[GmailMessage]:
         try:
             with self._client(access_token) as http:
@@ -417,12 +422,27 @@ class HttpGmailClient:
                 ]
                 for label in label_ids or []:
                     params.append(("labelIds", label))
-                listing = http.get("/messages", params=params)
-                listing.raise_for_status()
-                refs = listing.json().get("messages") or []
+                if after is not None:
+                    params.append(("q", f"after:{int(after.timestamp())}"))
+                refs: list[dict] = []
+                seen_tokens: set[str] = set()
+                for _ in range(50):
+                    listing = http.get("/messages", params=params)
+                    listing.raise_for_status()
+                    payload = listing.json()
+                    refs.extend(payload.get("messages") or [])
+                    token = payload.get("nextPageToken")
+                    if not token or after is None:
+                        break
+                    if token in seen_tokens:
+                        raise ValueError("Repeated Gmail page token")
+                    seen_tokens.add(token)
+                    params = [(k, v) for k, v in params if k != "pageToken"] + [("pageToken", token)]
+                else:
+                    raise GmailClientError("Too many messages. Choose a shorter sync window.")
 
                 messages: list[GmailMessage] = []
-                for ref in refs[:max_results]:
+                for ref in (refs if after is not None else refs[:max_results]):
                     message_id = str(ref.get("id", ""))
                     if not message_id:
                         continue
@@ -434,7 +454,7 @@ class HttpGmailClient:
 
                 # Newest first by received timestamp.
                 messages.sort(key=lambda m: m.received_at, reverse=True)
-                return messages[:max_results]
+                return messages if after is not None else messages[:max_results]
         except (httpx.HTTPError, KeyError, ValueError) as exc:
             _log_gmail_error("list_messages", exc)
             raise GmailClientError(

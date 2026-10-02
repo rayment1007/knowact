@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import String, cast, func, literal, or_, select, union_all
+from sqlalchemy import String, cast, delete, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from app.core.models import ActionItem, AuditLog, ClassificationResult, KnowledgeItem, SourceItem, SourceType, User
@@ -18,9 +18,41 @@ from app.dependencies import get_current_user, not_found
 from app.modules.cwi.models import (
     CalendarSource, DocumentAsset, DocumentChunk, EmailDraft,
     EmailMessageRecord, IntegrationConnection, SourceProposal,
+    SyncPreference, SyncExclusion,
 )
+from app.modules.cwi.services.sync_preferences import SyncPreferenceView, preferences
 
 router = APIRouter(prefix="/workspace", tags=["workspace"])
+
+
+@router.get("/sync-preferences", response_model=SyncPreferenceView)
+def get_sync_preferences(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return preferences(db, user.organization_id, user.id)
+
+
+@router.put("/sync-preferences", response_model=SyncPreferenceView)
+def save_sync_preferences(payload: SyncPreferenceView, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    row = db.scalar(select(SyncPreference).where(SyncPreference.user_id == user.id, SyncPreference.organization_id == user.organization_id))
+    if row is None:
+        row = SyncPreference(user_id=user.id, organization_id=user.organization_id)
+        db.add(row)
+    for key, value in payload.model_dump().items():
+        setattr(row, key, value)
+    db.flush()
+    return row
+
+
+@router.get("/sync-exclusions")
+def sync_exclusions(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return {"count": db.scalar(select(func.count()).select_from(SyncExclusion).where(
+        SyncExclusion.organization_id == user.organization_id, SyncExclusion.user_id == user.id)) or 0}
+
+
+@router.delete("/sync-exclusions")
+def restore_sync_exclusions(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    db.execute(delete(SyncExclusion).where(SyncExclusion.organization_id == user.organization_id, SyncExclusion.user_id == user.id))
+    return {"restored": True}
+
 SearchKind = Literal["all", "email", "file", "note", "knowledge", "action", "draft", "calendar"]
 
 
@@ -75,6 +107,8 @@ def calendar_source(source_id: UUID, db: Session = Depends(get_db), user: User =
 
 @router.get("/summary")
 def summary(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from app.modules.cwi.routers.workspace_browser import counts
+    review_counts = counts(db, user)
     def count(model, *conditions):
         return db.scalar(select(func.count()).select_from(model).where(
             model.organization_id == user.organization_id, *conditions
@@ -86,13 +120,10 @@ def summary(db: Session = Depends(get_db), user: User = Depends(get_current_user
         "notes": count(SourceItem, SourceItem.created_by == user.id, SourceItem.source_type.notin_([SourceType.EMAIL, SourceType.DOCUMENT])),
         "open_actions": count(ActionItem, ActionItem.status.in_(["OPEN", "IN_PROGRESS"])),
         "knowledge": count(KnowledgeItem, KnowledgeItem.status == "CONFIRMED"),
-        "knowledge_reviews": count(KnowledgeItem, KnowledgeItem.status == "SUGGESTED") + count(SourceProposal, SourceProposal.user_id == user.id, SourceProposal.target == "knowledge", SourceProposal.status == "SUGGESTED"),
-        "source_reviews": count(SourceItem, SourceItem.created_by == user.id,
-            SourceItem.status.notin_(["ARCHIVED", "DISMISSED"]),
-            select(ClassificationResult.id).where(
-                ClassificationResult.source_item_id == SourceItem.id,
-                ClassificationResult.status == "SUGGESTED",
-            ).exists()),
+        "knowledge_reviews": review_counts["knowledge_reviews"],
+        "action_reviews": review_counts["actions_reviews"],
+        "draft_reviews": count(EmailDraft, EmailDraft.user_id == user.id, EmailDraft.status == "AI_SUGGESTED"),
+        "source_reviews": review_counts["sources_reviews"],
     }
 
 

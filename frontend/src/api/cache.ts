@@ -101,15 +101,15 @@ export function mutationDependencies(path: string, method = "POST"): string[] {
   const root = path.split("/")[1];
   const workspace = ["/workspace/summary", "/workspace/search", "/workspace/activity", "/workspace/items", "/workspace/counts", "/workspace/source", "/workspace/proposals", "/workspace/knowledge"];
   const dependencies: Record<string, string[]> = {
-    workspace: ["/workspace/proposals", "/workspace/knowledge", "/workspace/actions", "/knowledge", "/actions"],
-    actions: ["/actions", "/knowledge", "/workspace/actions", ...(method === "DELETE" ? ["/calendar"] : [])],
+    workspace: ["/workspace/sync-preferences", "/workspace/sync-exclusions", "/workspace/proposals", "/workspace/knowledge", "/workspace/actions", "/knowledge", "/actions"],
+    actions: ["/actions", "/knowledge", "/workspace/actions", ...(path.endsWith("/add-to-calendar") ? ["/workspace/calendar", "/calendar"] : method === "DELETE" ? ["/calendar"] : [])],
     knowledge: ["/knowledge", "/source-items", ...(method === "DELETE" ? ["/actions"] : [])],
     "source-items": ["/source-items", ...(method === "DELETE" ? ["/knowledge", "/gmail", "/email-drafts", "/workspace/actions"] : path.endsWith("/extract") ? ["/knowledge"] : [])],
     documents: ["/documents", "/workspace/files", ...(method === "DELETE" ? ["/workspace/actions"] : [])],
     gmail: ["/gmail", "/source-items", "/actions", "/workspace/actions", "/workspace/suggestions", "/knowledge", "/documents", "/integrations", "/privacy"],
     calendar: ["/calendar", "/workspace/calendar", "/workspace/actions", "/integrations", "/privacy"],
     integrations: ["/integrations", "/privacy"],
-    "email-drafts": ["/email-drafts"],
+    "email-drafts": ["/email-drafts", "/gmail", "/source-items"],
     privacy: ["/privacy", "/integrations", "/gmail", "/documents", "/source-items", "/knowledge", "/email-drafts", "/workspace/files", "/workspace/suggestions", "/workspace/actions"],
     copilot: ["/source-items", "/knowledge", "/actions", "/email-drafts"],
     "business-entities": ["/business-entities", "/actions", "/knowledge"],

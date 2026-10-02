@@ -9,7 +9,7 @@ export interface WorkspaceSearch { items: WorkspaceResult[]; total: number; has_
 export interface WorkspaceSummary {
   documents: number; documents_pending: number; documents_failed: number;
   notes: number; open_actions: number; knowledge: number;
-  source_reviews: number; knowledge_reviews: number;
+  source_reviews: number; knowledge_reviews: number; action_reviews: number; draft_reviews?: number;
 }
 export interface WorkspaceActivity { id: string; label: string; title: string; path: string | null; created_at: string }
 export interface ActivityPage { items: WorkspaceActivity[]; has_more: boolean }

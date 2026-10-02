@@ -40,8 +40,8 @@ describe("dashboard brief and review entry points", () => {
     render(<MemoryRouter><EnterpriseDashboardPage /></MemoryRouter>);
     expect(await screen.findByText("1 action due today.")).toBeInTheDocument();
     expect(screen.getByText(/Mon, 28 Sept? 2026/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Sources to review/ })).toHaveAttribute("href", "/source-inbox?review=1");
-    expect(screen.getByRole("link", { name: /Knowledge to review/ })).toHaveAttribute("href", "/knowledge?status=SUGGESTED");
+    expect(screen.getByRole("link", { name: /Needs review/ })).toHaveAttribute("href", "/reviews");
+    expect(screen.getByRole("link", { name: /Today’s to-do/ })).toHaveAttribute("href", "/workspace/actions?due=2026-09-28");
     expect(screen.queryByText("High")).not.toBeInTheDocument();
     expect(screen.queryByText(/Conflict/)).not.toBeInTheDocument();
     expect(calls.some(call => call.includes("/brief/daily"))).toBe(false);

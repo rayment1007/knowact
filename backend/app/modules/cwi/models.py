@@ -57,6 +57,24 @@ from app.core.models import Sensitivity, SuggestionStatus
 from app.database import Base, OrganizationScopedMixin
 
 
+class SyncPreference(OrganizationScopedMixin, Base):
+    __tablename__ = "sync_preferences"
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), primary_key=True)
+    email_days: Mapped[int] = mapped_column(Integer, default=7, nullable=False)
+    calendar_past_days: Mapped[int] = mapped_column(Integer, default=7, nullable=False)
+    calendar_future_days: Mapped[int] = mapped_column(Integer, default=90, nullable=False)
+
+
+class SyncExclusion(OrganizationScopedMixin, Base):
+    """Minimal deletion marker; contains no email content or provider credentials."""
+    __tablename__ = "sync_exclusions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    account_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    external_id_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    __table_args__ = (UniqueConstraint("user_id", "account_email", "external_id_hash", name="uq_sync_exclusion_identity"),)
+
+
 class SourceProposal(OrganizationScopedMixin, Base):
     """An editable draft requested by its owner, separate from accepted records.
 
@@ -387,6 +405,7 @@ class CalendarSource(OrganizationScopedMixin, Base):
     """Read-only snapshot of a primary-calendar event, separate from writes."""
 
     __tablename__ = "calendar_sources"
+    google_calendar_id: Mapped[str] = mapped_column(String(320), default="primary", server_default="primary", nullable=False)
     id: Mapped[uuid.UUID] = _uuid_pk()
     integration_connection_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("integration_connections.id"), nullable=False
@@ -604,6 +623,7 @@ class CalendarEventLink(OrganizationScopedMixin, Base):
     """
 
     __tablename__ = "calendar_event_links"
+    pending_event_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     # ``organization_id`` is contributed by OrganizationScopedMixin.

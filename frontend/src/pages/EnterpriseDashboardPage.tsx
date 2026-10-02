@@ -45,7 +45,7 @@ export default function EnterpriseDashboardPage() {
   const today = localDay(now);
   const overdue = openActions.filter(item => item.due_date && item.due_date < today).length;
   const dueToday = openActions.filter(item => item.due_date === today).length;
-  const reviews = (summary?.source_reviews ?? 0) + (summary?.knowledge_reviews ?? 0);
+  const reviews = (summary?.source_reviews ?? 0) + (summary?.knowledge_reviews ?? 0) + (summary?.action_reviews ?? 0) + (summary?.draft_reviews ?? 0);
   const briefReady = !!summary && !!actions.data && !!calendar.data;
   const briefError = (!summary && !!statusError) || (!actions.data && actions.error) || (!calendar.data && calendar.error);
   const briefStale = !!statusError || actions.error || calendar.error;
@@ -74,6 +74,7 @@ export default function EnterpriseDashboardPage() {
           {openActions[0] && <li><Link className="hover:text-blue-700" to={`/actions/${openActions[0].id}`}>→ {openActions[0].title}</Link></li>}
           {!!summary?.source_reviews && <li><Link className="hover:text-blue-700" to="/source-inbox?review=1">→ Review {unit(summary.source_reviews, "source suggestion")}</Link></li>}
           {!!summary?.knowledge_reviews && <li><Link className="hover:text-blue-700" to="/knowledge?status=SUGGESTED">→ Review {unit(summary.knowledge_reviews, "knowledge suggestion")}</Link></li>}
+          {!!summary?.action_reviews && <li><Link className="hover:text-blue-700" to="/workspace/actions?status=SUGGESTED">→ Review {unit(summary.action_reviews, "action suggestion")}</Link></li>}
           {events[0] && <li><Link className="hover:text-blue-700" to={`/calendar-sources/${events[0].id}`}>→ {events[0].title}</Link></li>}
           {quiet && <li>{syncFailed ? "Retry Sync Now to check your connected sources." : syncing ? "Checking your connected sources…" : "Room to think. Or finally finish that coffee."}</li>}
         </ul></div>
@@ -81,14 +82,14 @@ export default function EnterpriseDashboardPage() {
     </section>
 
     <div className="mb-6 grid grid-cols-2 gap-3 xl:grid-cols-4">{([
-      ["Sources to review", summary?.source_reviews, "/source-inbox?review=1", "file", "AI classification suggestions"],
-      ["Knowledge to review", summary?.knowledge_reviews, "/knowledge?status=SUGGESTED", "note", "AI knowledge awaiting confirmation"],
+      ["Needs review", summary ? reviews : undefined, "/reviews", "file", "Sources, knowledge, actions and email drafts"],
+      ["Today’s to-do", actions.data ? dueToday : undefined, `/workspace/actions?due=${today}`, "check", "Open actions due today"],
       ["Open actions", summary?.open_actions, "/actions", "arrow", "Open and in progress"],
       ["Confirmed knowledge", summary?.knowledge, "/knowledge?status=CONFIRMED", "note", "Reviewed and saved"],
     ] as const).map(([label, count, path, icon, description]) => <Link key={label} to={path} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-blue-300"><div className="flex items-center justify-between gap-2 text-xs font-medium text-slate-600">{label}<WorkspaceIcon name={icon} className="h-4 w-4 shrink-0 text-blue-500" /></div><p className="mt-3 text-3xl font-semibold tracking-tight text-slate-900">{count ?? "—"}</p><p className="mt-2 text-[11px] leading-relaxed text-slate-400">{description}</p></Link>)}</div>
 
     <div className="mb-6 grid gap-5 xl:grid-cols-3">
-      <Panel title="Upcoming events" icon="calendar" link={{ to: "/calendar-sources", label: "View calendar" }} description="Captured dates from your primary calendar. Recurring series are not expanded.">
+      <Panel title="Upcoming events" icon="calendar" link={{ to: "/calendar-sources", label: "View calendar" }} description="Your synced calendar and events created in KnowAct.">
         <QueryNotice error={calendar.error} retry={calendar.retry} loading={!calendar.data} empty={!events.length}>No upcoming dates in your captured events.</QueryNotice>
         <ul className="divide-y divide-slate-100">{events.slice(0, 3).map(event => <li key={event.id}><Link to={`/calendar-sources/${event.id}`} className="block px-5 py-4 hover:bg-slate-50"><p className="text-xs font-medium text-blue-600">{eventDate(event)}</p><p className="mt-1 line-clamp-2 text-sm font-medium text-slate-800">{event.title}</p>{event.location && <p className="mt-1 truncate text-xs text-slate-400">{event.location}</p>}</Link></li>)}</ul>
       </Panel>

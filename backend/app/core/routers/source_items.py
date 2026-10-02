@@ -180,7 +180,11 @@ def delete_source_item(
     cross-tenant id yields ``404`` (Requirement 2.3).
     """
 
-    IngestionService(db).delete(organization_id, item_id, user.id)
+    from app.dependencies import not_found
+    service = IngestionService(db)
+    if service.get(organization_id, item_id).created_by != user.id:
+        raise not_found("Source not found.")
+    service.delete(organization_id, item_id, user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

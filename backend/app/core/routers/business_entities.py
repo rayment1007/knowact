@@ -33,11 +33,14 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.core.models import BusinessEntity, User
+from app.core.models import BusinessEntity, User, KnowledgeItem, ActionItem, DecisionRecord, Brief
+from app.modules.cwi.models import EmailTaskSuggestion, EmailDraft
+from app.core.services.audit_service import AuditService
+from app.dependencies import not_found
 from app.core.schemas import (
     BriefResponse,
     BusinessEntityCreate,
@@ -105,6 +108,23 @@ def create_business_entity(
     db.add(entity)
     db.flush()
     return BusinessEntityResponse.model_validate(entity)
+
+
+@router.delete("/{entity_id}", status_code=204)
+def delete_business_entity(entity_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    entity = db.scalar(select(BusinessEntity).where(BusinessEntity.id == entity_id, BusinessEntity.organization_id == user.organization_id))
+    if entity is None:
+        raise not_found("Project / entity not found.")
+    for model in (KnowledgeItem, ActionItem, DecisionRecord, EmailTaskSuggestion, EmailDraft):
+        db.execute(update(model).where(model.organization_id == user.organization_id,
+            model.business_entity_id == entity_id).values(business_entity_id=None))
+    db.execute(update(Brief).where(Brief.organization_id == user.organization_id,
+        Brief.scope_ref_id == entity_id).values(scope_ref_id=None))
+    AuditService(db).record(org_id=user.organization_id, actor_id=user.id,
+        action_type="DELETE_BUSINESS_ENTITY", target_type="BusinessEntity", target_id=entity_id,
+        detail={"name": entity.name, "records_retained": True})
+    db.delete(entity)
+    db.flush()
 
 
 @router.get("/{entity_id}/brief", response_model=BriefResponse)

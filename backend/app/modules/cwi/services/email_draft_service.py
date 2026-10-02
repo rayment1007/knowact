@@ -44,6 +44,9 @@ deterministic fake and no real Gmail call — and no real email — ever occurs
 """
 
 from __future__ import annotations
+from datetime import datetime, timezone
+import logging
+from sqlalchemy.exc import SQLAlchemyError
 
 import re
 from uuid import UUID, uuid4
@@ -867,6 +870,24 @@ class EmailDraftService:
         draft.gmail_sent_message_id = sent_message_id
         self.db.add(draft)
         self.db.flush()
+
+        # Capture the confirmed send using Gmail's actual message ID. A later
+        # sync resolves this same evidence instead of proposing another task.
+        from app.modules.cwi.services.gmail_sync_service import GmailSyncService, SyncRun
+        from app.modules.cwi.services.gmail_client import GmailMessage
+        from app.modules.cwi.schemas import InitialSyncOptions
+        try:
+            with self.db.begin_nested():
+                GmailSyncService(self.db, gmail_client=self.gmail)._ingest_message_race_safe(org_id, connection,
+                    GmailMessage(gmail_message_id=sent_message_id,
+                        gmail_thread_id=draft.gmail_thread_id or "", sender=connection.account_email,
+                        subject=draft.subject, body_text=draft.body_text,
+                        received_at=datetime.now(timezone.utc), recipients=list(draft.to_recipients_json), labels=["SENT"]),
+                    InitialSyncOptions(include_sent=True), SyncRun())
+        except SQLAlchemyError:
+            # A supplementary local snapshot must not undo an acknowledged
+            # send. The next sync reconciles it using the saved provider ID.
+            logging.getLogger(__name__).warning("Sent email snapshot deferred until the next sync.")
 
         self.audit.record(
             org_id=org_id,

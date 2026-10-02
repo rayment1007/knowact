@@ -29,7 +29,7 @@ import base64
 import hashlib
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 import httpx
@@ -119,7 +119,7 @@ class CalendarClient(Protocol):
     a deterministic fake. No CWI code depends on the concrete type.
     """
 
-    def list_events(self, *, access_token: str) -> list[dict]:
+    def list_events(self, *, access_token: str, time_min: datetime | None = None, time_max: datetime | None = None) -> list[dict]:
         """Read the complete primary-calendar event snapshot, following pages."""
 
     def list_calendars(self, *, access_token: str) -> list[CalendarInfo]:
@@ -197,7 +197,7 @@ class FakeCalendarClient:
         self.fail_next_create: bool = False
         self.source_events: list[dict] = []
 
-    def list_events(self, *, access_token: str) -> list[dict]:
+    def list_events(self, *, access_token: str, time_min: datetime | None = None, time_max: datetime | None = None) -> list[dict]:
         return list(self.source_events)
 
     def set_calendars(self, calendars: list[CalendarInfo]) -> None:
@@ -279,8 +279,9 @@ def _event_body(event: CalendarEventInput) -> dict:
         body["description"] = event.description
 
     if event.all_day and event.all_day_date:
-        body["start"] = {"date": event.all_day_date}
-        body["end"] = {"date": event.all_day_date}
+        day = date.fromisoformat(event.all_day_date) if isinstance(event.all_day_date, str) else event.all_day_date
+        body["start"] = {"date": day.isoformat()}
+        body["end"] = {"date": (day + timedelta(days=1)).isoformat()}
     else:
         if event.start is not None:
             body["start"] = {"dateTime": event.start.isoformat()}
@@ -337,11 +338,17 @@ class HttpCalendarClient:
 
     # -- Public API ---------------------------------------------------------
 
-    def list_events(self, *, access_token: str) -> list[dict]:
+    def list_events(self, *, access_token: str, time_min: datetime | None = None, time_max: datetime | None = None) -> list[dict]:
         # Keep recurring masters (no unbounded recurrence expansion). A full
         # snapshot also observes deletions without persisting expired tokens.
         events: list[dict] = []
         params: dict[str, str | int] = {"maxResults": 2500, "singleEvents": "false"}
+        if time_min is not None:
+            params["timeMin"] = time_min.isoformat()
+        if time_max is not None:
+            params["timeMax"] = time_max.isoformat()
+        if time_min is not None and time_max is not None:
+            params["singleEvents"] = "true"
         seen_tokens: set[str] = set()
         try:
             with self._client(access_token) as http:

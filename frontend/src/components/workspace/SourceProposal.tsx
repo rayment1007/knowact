@@ -43,7 +43,6 @@ export function SourceAddButtons({ kind, id }: { kind: SourceKind; id: string })
       <button className={primaryClass} disabled={!!busy} onClick={() => void generate("knowledge")}>{busy === "knowledge" ? "Preparing draft…" : "Add to Knowledge"}</button>
       <button className={buttonClass} disabled={!!busy} onClick={() => void generate("action")}>{busy === "action" ? "Preparing draft…" : "Add to Actions"}</button>
     </div>
-    <p className="text-xs leading-relaxed text-slate-500">AI prepares an editable draft from this source. Review and approve it before it becomes knowledge or an action. For long sources, only the first 24,000 characters are analysed.</p>
     {busy && <p role="status" className="text-sm text-blue-700">Reading source and preparing your draft…</p>}
     {sensitive && <div role="alert" className="space-y-2 text-sm text-amber-800"><p>This source is marked highly sensitive. Send its text to the configured AI provider to prepare this draft?</p><button className={buttonClass} onClick={() => void generate(sensitive, true)}>Confirm and prepare draft</button><button className={`${buttonClass} ml-2`} onClick={() => setSensitive(null)}>Cancel</button></div>}
     {error && <ErrorState message={error} variant="alert" />}

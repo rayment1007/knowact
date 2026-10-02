@@ -25,7 +25,7 @@ function connection(id: string, service: IntegrationConnection["service"], statu
 function Path() { return <output aria-label="path">{useLocation().pathname}</output>; }
 beforeEach(() => {
   vi.mocked(integrationsApi.list).mockResolvedValue([]);
-  vi.mocked(workspaceApi.summary).mockResolvedValue({ documents: 2, documents_pending: 0, documents_failed: 0, notes: 1, knowledge: 2, open_actions: 3, source_reviews: 0, knowledge_reviews: 0 });
+  vi.mocked(workspaceApi.summary).mockResolvedValue({ documents: 2, documents_pending: 0, documents_failed: 0, notes: 1, knowledge: 2, open_actions: 3, source_reviews: 0, knowledge_reviews: 0, action_reviews: 0 });
   vi.mocked(gmailApi.syncNow).mockResolvedValue({} as never);
   vi.mocked(workspaceApi.syncCalendar).mockResolvedValue({ events_synced: 2 });
 });
@@ -59,7 +59,7 @@ describe("workspace login sync", () => {
     const user = userEvent.setup();
     render(<MemoryRouter><WorkspaceProvider><SyncStatusBar /></WorkspaceProvider></MemoryRouter>);
     await user.click(screen.getByRole("button", { name: "Sync status" }));
-    expect(await screen.findByText(/Sync failed/)).toBeInTheDocument();
+    expect(await screen.findByText("⚠ Sync failed", { exact: true })).toBeInTheDocument();
     expect(screen.getByText(/Last successful sync:.*2026, \d{2}:\d{2}:\d{2}/)).toBeInTheDocument();
     expect(workspaceApi.syncCalendar).toHaveBeenCalledOnce();
     await user.click(screen.getByRole("button", { name: "Sync Now" }));

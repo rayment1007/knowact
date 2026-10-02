@@ -214,7 +214,7 @@ def test_initial_sync_rejects_invalid_options_with_422(
     connection_id = _connect_gmail(cwi_client)
 
     bad = {
-        "date_range_days": 45,  # not in {7, 30, 90}
+        "date_range_days": 366,  # exceeds the adjustable one-year limit
         "include_sent": False,
         "attachment_handling": "METADATA_ONLY",
         "storage_policy": "EXTRACTED_ONLY",

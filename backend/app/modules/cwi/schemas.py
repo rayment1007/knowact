@@ -100,11 +100,11 @@ class InitialSyncOptions(BaseModel):
 
     An invalid payload is rejected by Pydantic with ``422`` before any sync
     begins, so a bad configuration never starts a partial import (Requirement
-    26.6). ``date_range_days`` is constrained to the allowed {7, 30, 90} window;
+    26.6). ``date_range_days`` is constrained to 1–365 days;
     ``attachment_handling`` and ``storage_policy`` to their enumerated choices.
     """
 
-    date_range_days: Literal[7, 30, 90] = 30
+    date_range_days: int = Field(default=7, ge=1, le=365)
     labels: list[str] | None = None
     include_sent: bool = False
     attachment_handling: Literal["IGNORE", "METADATA_ONLY", "STORE"] = (

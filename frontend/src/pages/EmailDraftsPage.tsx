@@ -26,7 +26,6 @@ import type {
   ReferencedFact,
 } from "@/api";
 import { EmptyState, ErrorState, LoadingState } from "@/components/feedback";
-import OperationalSupportDisclaimer from "@/components/OperationalSupportDisclaimer";
 
 const STATUS_LABELS: Record<EmailDraftStatus, string> = {
   AI_SUGGESTED: "AI suggested",
@@ -583,7 +582,6 @@ export default function EmailDraftsPage() {
           are resolved by the system, and email is only ever sent after a
           separate, explicit confirmation.
         </p>
-        <OperationalSupportDisclaimer variant="banner" className="mt-3" />
       </header>
 
       <section className="mb-6 rounded-lg border border-slate-200 bg-white p-4">

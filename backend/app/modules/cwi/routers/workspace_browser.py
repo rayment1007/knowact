@@ -1,5 +1,6 @@
 """Paged, read-only workspace views. Opening a record never invokes an AI/provider."""
 from typing import Literal
+from datetime import date
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -10,7 +11,7 @@ from app.core.models import ActionItem, AuditLog, ClassificationResult, Knowledg
 from app.core.schemas import SourceItemResponse
 from app.database import get_db
 from app.dependencies import get_current_user, not_found
-from app.modules.cwi.models import CalendarEventLink, CalendarSource, DocumentAsset, DocumentChunk, EmailMessageRecord, EmailTaskSuggestion, IntegrationConnection, SourceProposal
+from app.modules.cwi.models import CalendarEventLink, CalendarSource, DocumentAsset, DocumentChunk, EmailDraft, EmailMessageRecord, EmailTaskSuggestion, IntegrationConnection, SourceProposal
 from app.modules.cwi.schemas import DocumentAssetView, EmailTaskSuggestionView, CalendarEventLinkView
 
 router = APIRouter(prefix="/workspace", tags=["workspace"])
@@ -59,8 +60,12 @@ def _feed(section, user, q="", entity_id=None):
             _classification_state(), SourceItem.created_at, user).where(SourceItem.created_by == user.id,
             ~select(EmailMessageRecord.id).where(EmailMessageRecord.source_item_id == SourceItem.id).exists(),
             matches(SourceItem.title, SourceItem.content))
+        sent_here = select(EmailDraft.id).where(EmailDraft.organization_id == user.organization_id,
+            EmailDraft.user_id == user.id, EmailDraft.status == "SENT",
+            EmailDraft.integration_connection_id == EmailMessageRecord.integration_connection_id,
+            EmailDraft.gmail_sent_message_id == EmailMessageRecord.gmail_message_id).exists()
         emails = _rows(EmailMessageRecord, "email", literal("email"), EmailMessageRecord.subject,
-            SourceItem.content, _classification_state(), EmailMessageRecord.received_at, user).outerjoin(SourceItem,
+            SourceItem.content, case((sent_here, "CREATED_HERE"), else_=_classification_state()), EmailMessageRecord.received_at, user).outerjoin(SourceItem,
             and_(SourceItem.id == EmailMessageRecord.source_item_id, SourceItem.created_by == user.id,
                  SourceItem.organization_id == user.organization_id)).where(EmailMessageRecord.id.in_(_owned_email(user)),
             matches(EmailMessageRecord.subject, EmailMessageRecord.sender, SourceItem.content))
@@ -73,8 +78,11 @@ def _feed(section, user, q="", entity_id=None):
         files = _rows(DocumentAsset, "file", literal("file"), DocumentAsset.filename, chunk,
             file_state, DocumentAsset.created_at, user).where(DocumentAsset.uploaded_by == user.id,
             DocumentAsset.source_deleted.is_(False), or_(matches(DocumentAsset.filename), chunk.is_not(None)))
+        created_here = select(CalendarEventLink.id).where(CalendarEventLink.organization_id == user.organization_id,
+            CalendarEventLink.user_id == user.id, CalendarEventLink.integration_connection_id == CalendarSource.integration_connection_id,
+            CalendarEventLink.google_event_id == CalendarSource.google_event_id).exists()
         calendar = _rows(CalendarSource, "calendar", literal("calendar"), CalendarSource.title, CalendarSource.description,
-            literal("RAW"), CalendarSource.updated_at, user).join(IntegrationConnection).where(
+            case((created_here, "CREATED_HERE"), else_="RAW"), CalendarSource.updated_at, user).join(IntegrationConnection).where(
             IntegrationConnection.user_id == user.id, IntegrationConnection.organization_id == user.organization_id,
             matches(CalendarSource.title, CalendarSource.description, CalendarSource.location))
         return union_all(notes, emails, files, calendar).subquery()
@@ -111,11 +119,15 @@ def _page(db, query, limit, offset):
 def items(section: Section = "sources", q: str = Query("", max_length=200),
           source_type: Literal["all", "email", "calendar", "file", "note"] = "all",
           status: str = Query("", max_length=30), order: Literal["newest", "oldest"] = "newest",
-          entity_id: UUID | None = None,
+          entity_id: UUID | None = None, due: date | None = None,
           limit: int = Query(20, ge=1, le=50), offset: int = Query(0, ge=0, le=100000),
           db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     rows = _feed(section, user, q, entity_id)
     query = select(rows)
+    if due is not None and section == "actions":
+        query = query.where(rows.c.kind == "action", rows.c.id.in_(select(cast(ActionItem.id, String)).where(
+            ActionItem.organization_id == user.organization_id, ActionItem.due_date == due,
+            ActionItem.status.in_(["OPEN", "IN_PROGRESS"]))))
     if source_type != "all" and section == "sources":
         query = query.where(rows.c.source_type == source_type)
     # Status counts reflect the selected source type and search, before status.
@@ -151,12 +163,26 @@ def source_detail(kind: SourceKind, item_id: UUID, db: Session = Depends(get_db)
                     "gmail_message_id": row.gmail_message_id}
     elif kind == "calendar":
         metadata = {"starts_at": row.starts_at, "ends_at": row.ends_at, "location": row.location, "html_link": row.html_link}
+    created_from = None
+    if kind == "email":
+        sent = db.scalar(select(EmailDraft).where(EmailDraft.organization_id == user.organization_id,
+            EmailDraft.user_id == user.id, EmailDraft.status == "SENT",
+            EmailDraft.integration_connection_id == row.integration_connection_id,
+            EmailDraft.gmail_sent_message_id == row.gmail_message_id))
+        if sent:
+            created_from = {"label": "Sent from your approved Gmail draft", "path": f"/email-drafts/{sent.id}"}
+    elif kind == "calendar":
+        link = db.scalar(select(CalendarEventLink).where(CalendarEventLink.organization_id == user.organization_id,
+            CalendarEventLink.user_id == user.id, CalendarEventLink.integration_connection_id == row.integration_connection_id,
+            CalendarEventLink.google_event_id == row.google_event_id))
+        if link:
+            created_from = {"label": "Created from your approved calendar operation", "path": f"/actions/{link.action_item_id}" if link.action_item_id else f"/calendar/{link.id}"}
     return {"id": row.id, "kind": kind,
         "title": row.subject if kind == "email" else row.filename if kind == "file" else row.title,
         "source": SourceItemResponse.model_validate(source) if source else None,
         "document": DocumentAssetView.model_validate(row) if kind == "file" else None,
         "raw_content": source.content if source else row.description if kind == "calendar" else None,
-        "metadata": metadata}
+        "metadata": metadata, "created_from": created_from}
 
 
 def _confirmed_email_action(user):
@@ -194,6 +220,10 @@ def source_links(kind: SourceKind, item_id: UUID, limit: int = Query(10, ge=1, l
         EmailTaskSuggestion.email_message_record_id.in_(_owned_email(user)), email_condition, EmailTaskSuggestion.status == "SUGGESTED")
     actions = _rows(ActionItem, "action", literal("action"), ActionItem.title, ActionItem.evidence_text,
         ActionItem.status, ActionItem.created_at, user).where(or_(ActionItem.knowledge_item_id.in_(knowledge_ids),
+            ActionItem.id.in_(select(CalendarEventLink.action_item_id).where(CalendarEventLink.organization_id == user.organization_id,
+                CalendarEventLink.user_id == user.id,
+                CalendarEventLink.integration_connection_id == row.integration_connection_id,
+                CalendarEventLink.google_event_id == row.google_event_id)) if kind == "calendar" else literal(False),
             _confirmed_email_action(user).where(email_condition).exists(),
             ActionItem.id.in_(approved.where(SourceProposal.target == "action"))))
     rows = union_all(knowledge, suggestions, actions, _proposal_rows(user).where(source_match)).subquery()

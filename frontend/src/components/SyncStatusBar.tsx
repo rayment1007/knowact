@@ -38,7 +38,7 @@ export default function SyncStatusBar() {
         });
       })}</div>
       <p className="mt-4 border-t border-slate-100 pt-3 text-[10px] text-slate-400">Times shown in {Intl.DateTimeFormat().resolvedOptions().timeZone}.</p>
-      {(error || Object.keys(failures).length > 0) && <p role="status" className="mt-2 text-xs text-amber-800">{error || "Some sources could not sync. Existing information is still available. Retry or check Settings."}</p>}
+      {(error || Object.keys(failures).length > 0) && <p role="status" className="mt-2 text-xs text-amber-800">{error || [...new Set(Object.values(failures))].join(" ")}</p>}
     </section>}
   </div>;
 }

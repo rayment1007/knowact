@@ -64,6 +64,7 @@ from app.core.services.ingestion_service import IngestionService
 from app.dependencies import not_found, scope_select
 from app.modules.cwi.models import (
     EmailMessageRecord,
+    EmailDraft,
     EmailSenderSignal,
     EmailTaskSuggestion,
     ConnectionStatus,
@@ -76,6 +77,7 @@ from app.modules.cwi.schemas import InitialSyncOptions
 from app.modules.cwi.services.gmail_client import GmailClient, GmailMessage, GmailClientError
 from app.modules.cwi.services.google_oauth import GMAIL_READONLY_SCOPE, GoogleOAuthError
 from app.modules.cwi.services.integration_service import IntegrationService
+from app.modules.cwi.services.sync_preferences import preferences, exclusion_query
 
 # Relevance values whose content is noise: excluded from knowledge and from
 # task-suggestion extraction (mirrors the KnowledgeService privacy gate).
@@ -299,6 +301,16 @@ class GmailSyncService:
            :class:`EmailTaskSuggestion` (Requirement 27.6).
         """
 
+        if self.db.scalar(exclusion_query(connection, message.gmail_message_id)) is not None:
+            run.skipped_ineligible += 1
+            return None
+        if self.db.scalar(select(EmailMessageRecord.id).where(
+            EmailMessageRecord.organization_id == org_id,
+            EmailMessageRecord.integration_connection_id == connection.id,
+            EmailMessageRecord.gmail_message_id == message.gmail_message_id,
+        )) is not None:
+            run.skipped_duplicates += 1
+            return None
         content_hash = compute_content_hash(message)
         if self._find_existing(org_id, connection.id, content_hash) is not None:
             run.skipped_duplicates += 1
@@ -342,6 +354,16 @@ class GmailSyncService:
         self.db.flush()
         run.records_created += 1
         run.record_ids.append(record.id)
+
+        # A sent draft was already reviewed and explicitly sent by its owner.
+        # Store the provider evidence, without reclassifying it as incoming work.
+        own_draft = self.db.scalar(select(EmailDraft.id).where(
+            EmailDraft.organization_id == org_id, EmailDraft.user_id == connection.user_id,
+            EmailDraft.integration_connection_id == connection.id,
+            EmailDraft.gmail_sent_message_id == message.gmail_message_id,
+            EmailDraft.status == "SENT"))
+        if own_draft is not None:
+            return record
 
         # 3) Classify (SUGGESTED only) — biased by a sender/domain signal.
         signal = self._matching_sender_signal(
@@ -491,8 +513,9 @@ class GmailSyncService:
         """
 
         connection = self._get_connection(org_id, connection_id, user_id)
+        self.db.execute(select(IntegrationConnection).where(IntegrationConnection.id == connection.id).with_for_update()).scalar_one()
         label_ids = list(opts.labels) if opts.labels else None
-        messages = self._read_messages(org_id, user_id, connection, label_ids)
+        messages = self._read_messages(org_id, user_id, connection, label_ids, opts.date_range_days)
 
         now = datetime.now(timezone.utc)
         run = SyncRun()
@@ -519,16 +542,18 @@ class GmailSyncService:
 
         Ingests every not-yet-seen message the client currently returns; the
         content-hash dedup guarantees re-syncing already-ingested messages
-        creates nothing new (Requirement 27.2 / Property 15). Uses a permissive
-        default option set (no date/label narrowing, include sent).
+        creates nothing new (Requirement 27.2 / Property 15). Uses the owner's
+        saved date window for both login-time and manual sync, including sent mail.
         """
 
         connection = self._get_connection(org_id, connection_id, user_id)
-        messages = self._read_messages(org_id, user_id, connection)
+        self.db.execute(select(IntegrationConnection).where(IntegrationConnection.id == connection.id).with_for_update()).scalar_one()
+        window = preferences(self.db, org_id, user_id)
+        messages = self._read_messages(org_id, user_id, connection, days=window.email_days)
 
-        # Permissive defaults for an incremental pull; dedup does the rest.
+        # Keep originals already imported outside the current window.
         opts = InitialSyncOptions(
-            date_range_days=90,
+            date_range_days=window.email_days,
             labels=None,
             include_sent=True,
             attachment_handling="METADATA_ONLY",
@@ -538,9 +563,7 @@ class GmailSyncService:
         run = SyncRun()
         for message in messages:
             run.messages_seen += 1
-            # sync_now does not apply the initial date window — ingest anything
-            # not yet seen (dedup keeps it idempotent).
-            if not opts.include_sent and _SENT_LABEL in set(message.labels):
+            if not self._is_eligible(message, opts, now):
                 run.skipped_ineligible += 1
                 continue
             self._ingest_message_race_safe(
@@ -554,10 +577,11 @@ class GmailSyncService:
         self.db.flush()
         return run
 
-    def _read_messages(self, org_id, user_id, connection, label_ids=None):
+    def _read_messages(self, org_id, user_id, connection, label_ids=None, days=7):
         try:
             token = self._access_token(org_id, user_id, connection.id)
-            return self.gmail.list_messages(access_token=token, label_ids=label_ids)
+            return self.gmail.list_messages(access_token=token, label_ids=label_ids,
+                after=datetime.now(timezone.utc) - timedelta(days=days))
         except (GmailClientError, GoogleOAuthError):
             connection.last_error = "Gmail sync failed. Please retry or reconnect."
             self.db.flush()
@@ -803,7 +827,8 @@ class GmailSyncService:
         that reference it (their ``email_message_record_id`` FK is non-nullable,
         so they must go first), deletes the record, and records exactly one
         ``DELETE_EMAIL_MESSAGE`` audit row. The derived ``SourceItem`` (if any)
-        is retained — this only removes the Gmail provenance record.
+        is deleted too; approved knowledge/actions are retained. A minimal
+        deletion marker prevents the same provider message from returning.
 
         Args:
             org_id: The tenant the record must belong to.
@@ -816,19 +841,10 @@ class GmailSyncService:
 
         record = self.get_message_record(org_id, user_id, record_id)
 
-        from app.modules.cwi.services.source_proposal_service import discard_unapproved
-        discard_unapproved(self.db, org_id, "email", [record.id])
-
-        self.db.execute(
-            sa_delete(EmailTaskSuggestion).where(
-                EmailTaskSuggestion.organization_id == org_id,
-                EmailTaskSuggestion.email_message_record_id == record.id,
-            )
-        )
-
         deleted_id = record.id
-        self.db.delete(record)
-        self.db.flush()
+        from app.modules.cwi.services.privacy_service import PrivacyService
+        PrivacyService(self.db).delete_email_data(org_id, user_id,
+            scope="SELECTED", record_ids=[record.id])
 
         self.audit.record(
             org_id=org_id,

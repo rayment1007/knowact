@@ -8,7 +8,6 @@ import SyncStatusBar from "@/components/SyncStatusBar";
 import FloatingAssistant from "@/components/FloatingAssistant";
 import WorkspaceIcon from "@/components/WorkspaceIcon";
 import { WorkspaceProvider } from "@/components/WorkspaceProvider";
-import OperationalSupportDisclaimer from "@/components/OperationalSupportDisclaimer";
 import { ErrorState } from "@/components/feedback";
 import {
   findActiveNavGroup,
@@ -304,9 +303,6 @@ function WorkspaceShell() {
         </main>
 
         <FloatingAssistant />
-        <footer className="shrink-0 border-t border-slate-200 bg-white px-4 py-3 sm:px-6">
-          <OperationalSupportDisclaimer variant="footnote" />
-        </footer>
       </div>
     </div>
   );

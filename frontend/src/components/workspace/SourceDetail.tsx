@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { Link } from "react-router-dom";
-import { documentsApi, gmailApi, getErrorMessage } from "@/api";
+import { documentsApi, gmailApi, sourceItemsApi, getErrorMessage } from "@/api";
 import { browserApi, itemLink, type SourceKind, type SourceDetail as SourceDetailData } from "@/api/workspaceBrowser";
 import { invalidateApiCache } from "@/api/cache";
 import { useCachedQuery } from "@/hooks/useCachedQuery";
@@ -59,10 +59,10 @@ function SourceContents({ detail, onDeleted }: { detail: SourceDetailData; onDel
     } finally { setBusy(false); }
   }
   async function remove() {
-    const message = kind === "file" ? `Permanently delete "${detail.title}"? This removes the file, its extracted chunks, and embeddings. This cannot be undone.` : `Permanently delete "${detail.title}" and its email task suggestions? This cannot be undone.`;
+    const message = kind === "file" ? `Permanently delete "${detail.title}"? This removes the file, its extracted chunks, and embeddings. This cannot be undone.` : kind === "source" ? `Permanently delete note "${detail.title}"? Approved knowledge and actions will be kept. This cannot be undone.` : `Delete "${detail.title}" from KnowAct and exclude it from future imports? The original stays in Gmail. Approved records are kept.`;
     if (busy || !window.confirm(message)) return;
     setBusy(true); setError("");
-    try { if (kind === "file") await documentsApi.remove(id); else await gmailApi.removeMessage(id); onDeleted(); }
+    try { if (kind === "file") await documentsApi.remove(id); else if (kind === "source") await sourceItemsApi.remove(id); else await gmailApi.removeMessage(id); onDeleted(); }
     catch (err) { setError(getErrorMessage(err)); } finally { setBusy(false); }
   }
   const external = kind === "email" && metadata.gmail_message_id
@@ -91,8 +91,9 @@ function SourceContents({ detail, onDeleted }: { detail: SourceDetailData; onDel
         </div>}
         {kind === "calendar" && <dl className="space-y-2 rounded-xl bg-slate-50 p-4 text-sm"><div><dt className="text-xs text-slate-500">Starts</dt><dd>{metadata.starts_at ? (metadata.starts_at.length === 10 ? formatDay(metadata.starts_at) + " (all day)" : formatTimestamp(metadata.starts_at)) : "Not recorded"}</dd></div><div><dt className="text-xs text-slate-500">Ends</dt><dd>{metadata.ends_at ? (metadata.ends_at.length === 10 ? formatDay(metadata.ends_at) + " (exclusive end date)" : formatTimestamp(metadata.ends_at)) : "Not recorded"}</dd></div>{metadata.location && <div><dt className="text-xs text-slate-500">Location</dt><dd>{metadata.location}</dd></div>}</dl>}
         {detail.raw_content && <section><h3 className="mb-2 text-sm font-semibold text-slate-900">Original preview</h3><p className="line-clamp-4 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-600">{detail.raw_content}</p><button onClick={() => setTab("raw")} className="mt-2 text-xs font-medium text-blue-700">Read raw content →</button></section>}
+        {detail.created_from && <Link to={detail.created_from.path} className="block rounded-lg bg-emerald-50 p-3 text-xs text-emerald-800">{detail.created_from.label} →</Link>}
         <RelatedItems kind={kind} id={id} />
-        {(kind === "file" || kind === "email") && <button disabled={busy} onClick={() => void remove()} className="text-xs text-rose-600 hover:underline">Delete permanently</button>}
+        {(kind === "file" || kind === "email" || kind === "source") && <button disabled={busy} onClick={() => void remove()} className="text-xs text-rose-600 hover:underline">{kind === "email" ? "Delete from KnowAct" : "Delete permanently"}</button>}
       </>}
       {tab === "analysis" && (source ? <><p className="text-xs leading-relaxed text-slate-500">These are the existing AI classification and extraction tools. You can also use Add to Knowledge or Add to Actions above to choose a destination yourself.</p><ul><SourceItemCard key={source.id} item={source} onItemChanged={unchanged} onDeleted={onDeleted} initiallyExpanded panel /></ul></> : <div className="rounded-xl bg-slate-50 p-4 text-sm leading-relaxed text-slate-500">No AI summary or classification is stored for this source. {kind === "file" ? "File processing makes its text searchable; it does not create a reviewed knowledge record." : kind === "calendar" ? "Use Add to Knowledge or Add to Actions to prepare a draft from this captured event." : "The original email text is not stored here."}</div>)}
       {tab === "raw" && (kind === "file" ? <FileText id={id} /> : <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700">{detail.raw_content || "No raw text is stored for this source."}</p>)}

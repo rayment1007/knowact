@@ -160,7 +160,7 @@ def test_create_all_day_event_uses_date_fields() -> None:
     assert event_id == "evt-allday"
     body = captured["body"]
     assert body["start"] == {"date": "2025-03-15"}
-    assert body["end"] == {"date": "2025-03-15"}
+    assert body["end"] == {"date": "2025-03-16"}
     assert "dateTime" not in json.dumps(body)
 
 

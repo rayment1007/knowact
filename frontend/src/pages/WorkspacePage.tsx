@@ -6,18 +6,19 @@ import WorkspaceIcon, { type IconName } from "@/components/WorkspaceIcon";
 import { ErrorState, LoadingState } from "@/components/feedback";
 import AddSourceDialog from "@/components/workspace/AddSourceDialog";
 import ProposalDetail from "@/components/workspace/SourceProposal";
+import ManageProjects from "@/components/workspace/ManageProjects";
 import SourceDetail from "@/components/workspace/SourceDetail";
 import ActionDetail, { AddActionDialog, SuggestionDetail } from "@/components/workspace/ActionDetail";
 import { KnowledgeDetailPanel } from "@/pages/KnowledgeHubPage";
 import { inputClass, Pagination, primaryClass, StateBadge, stateLabel } from "@/components/workspace/WorkspacePrimitives";
 import { formatTimestamp } from "@/utils/workspaceDates";
-import { businessEntitiesApi, type BusinessEntity } from "@/api";
+import { businessEntitiesApi } from "@/api";
 
 const PAGE_SIZE = 20;
 const sections = [["sources", "Sources"], ["knowledge", "Knowledge"], ["actions", "Actions"]] as const;
 const types = [["all", "All sources", "file"], ["email", "Emails", "email"], ["calendar", "Calendar", "calendar"], ["file", "Files", "file"], ["note", "Notes", "note"]] as const;
 const statuses: Record<WorkspaceSection, string[]> = {
-  sources: ["NEEDS_REVIEW", "RAW", "REVIEWED", "UPLOADED", "PROCESSING", "INDEXED", "FAILED", "ARCHIVED", "DISMISSED"],
+  sources: ["NEEDS_REVIEW", "RAW", "REVIEWED", "UPLOADED", "PROCESSING", "INDEXED", "FAILED", "CREATED_HERE", "ARCHIVED", "DISMISSED"],
   knowledge: ["SUGGESTED", "CONFIRMED", "REJECTED"],
   actions: ["SUGGESTED", "OPEN", "IN_PROGRESS", "DONE", "CANCELLED"],
 };
@@ -29,7 +30,8 @@ export default function WorkspacePage() {
   const [params, setParams] = useSearchParams();
   const [searchText, setSearchText] = useState(params.get("q") ?? "");
   const [addingAction, setAddingAction] = useState(false);
-  const [entities, setEntities] = useState<BusinessEntity[]>([]);
+  const entityQuery = useCachedQuery("/business-entities", businessEntitiesApi.list);
+  const entities = entityQuery.data ?? [];
   const panel = useRef<HTMLElement>(null);
   const lastSelected = useRef<HTMLButtonElement | null>(null);
   const q = params.get("q") ?? "";
@@ -39,11 +41,12 @@ export default function WorkspacePage() {
   const status = statuses[section].includes(params.get("status") ?? "") ? params.get("status")! : "";
   const order = params.get("order") === "oldest" ? "oldest" : "newest";
   const entity = params.get("entity") ?? "";
+  const due = section === "actions" && /^\d{4}-\d{2}-\d{2}$/.test(params.get("due") ?? "") ? params.get("due")! : "";
   const item = params.get("item") ?? "";
   const [selectedKind, selectedId] = item.split(":") as [ItemKind, string];
   const allowedKinds = section === "sources" ? ["source", "email", "file", "calendar"] : section === "knowledge" ? ["knowledge", "proposal"] : ["action", "suggestion", "proposal"];
   const selected = allowedKinds.includes(selectedKind) && /^[0-9a-f-]{36}$/i.test(selectedId ?? "");
-  const path = `/workspace/items?${new URLSearchParams({ section, q, source_type: sourceType, status, order, ...(entity ? { entity_id: entity } : {}), offset: String((page - 1) * PAGE_SIZE), limit: String(PAGE_SIZE) })}`;
+  const path = `/workspace/items?${new URLSearchParams({ section, q, source_type: sourceType, status, order, ...(due ? { due } : {}), ...(entity ? { entity_id: entity } : {}), offset: String((page - 1) * PAGE_SIZE), limit: String(PAGE_SIZE) })}`;
   const query = useCachedQuery(path, () => browserApi.items(path));
   const counts = useCachedQuery("/workspace/counts", browserApi.counts);
   const setQuery = useCallback((values: Record<string, string | null>, replace = false) => {
@@ -52,12 +55,6 @@ export default function WorkspacePage() {
   const closeDetail = useCallback(() => setQuery({ item: null }), [setQuery]);
   const changeFilter = (values: Record<string, string | null>) => setQuery({ ...values, page: null, item: null });
   useEffect(() => { setSearchText(q); }, [q, section]);
-  useEffect(() => {
-    if (section === "sources") return;
-    let active = true;
-    void businessEntitiesApi.list().then(result => { if (active) setEntities(result); }).catch(() => {});
-    return () => { active = false; };
-  }, [section]);
   const entityNames = useMemo(() => new Map(entities.map(value => [value.id, value.name])), [entities]);
   useEffect(() => {
     if (selected) panel.current?.focus({ preventScroll: true });
@@ -95,18 +92,18 @@ export default function WorkspacePage() {
             </button>)}
           </div>
         </div>
-        {section !== "sources" && (entities.length > 0 || entity) && <div className="border-t border-slate-100 pt-3"><h2 className="mb-2 px-2 text-xs font-semibold text-slate-500">Project / entity</h2><div className="flex flex-wrap gap-1 xl:block">{[{ id: "", name: "All projects / entities" }, ...entities].map(value => <button key={value.id} aria-pressed={entity === value.id} className={`block rounded-lg px-3 py-2.5 text-left text-xs xl:w-full ${entity === value.id ? "bg-blue-50 font-medium text-blue-700" : "text-slate-600 hover:bg-slate-50"}`} onClick={() => changeFilter({ entity: value.id || null })}>{value.name}</button>)}</div></div>}
+        {section !== "sources" && (entities.length > 0 || entity) && <div className="border-t border-slate-100 pt-3"><h2 className="mb-2 px-2 text-xs font-semibold text-slate-500">Project / entity</h2><div className="flex flex-wrap gap-1 xl:block">{[{ id: "", name: "All projects / entities" }, ...entities].map(value => <button key={value.id} aria-pressed={entity === value.id} className={`block rounded-lg px-3 py-2.5 text-left text-xs xl:w-full ${entity === value.id ? "bg-blue-50 font-medium text-blue-700" : "text-slate-600 hover:bg-slate-50"}`} onClick={() => changeFilter({ entity: value.id || null })}>{value.name}</button>)}</div><ManageProjects entities={entities} onDeleted={id => { if (entity === id) changeFilter({ entity: null }); }} /></div>}
       </aside>
       <div className={`grid min-w-0 items-start gap-4 ${selected ? "lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]" : "grid-cols-1"}`}>
         <div className={`min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white ${selected ? "hidden lg:block" : ""}`}>
           <div className="space-y-3 border-b border-slate-100 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-semibold text-slate-900">{section === "sources" ? "Source items" : section === "knowledge" ? "Knowledge items" : "Actions & suggestions"}</h2>{!!reviewCount && <button className="text-xs font-medium text-rose-700 hover:underline" onClick={() => changeFilter({ status: section === "sources" ? "NEEDS_REVIEW" : "SUGGESTED", type: null })}>Review {reviewCount} pending</button>}</div>
+            <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-semibold text-slate-900">{section === "sources" ? "Source items" : section === "knowledge" ? "Knowledge items" : due ? `To do on ${due}` : "Actions & suggestions"}</h2>{!!reviewCount && <button className="text-xs font-medium text-rose-700 hover:underline" onClick={() => changeFilter({ status: section === "sources" ? "NEEDS_REVIEW" : "SUGGESTED", type: null })}>Review {reviewCount} pending</button>}</div>
             <form className="flex gap-2" role="search" onSubmit={event => { event.preventDefault(); changeFilter({ q: searchText.trim() || null }); }}>
               <input aria-label={`Search ${section}`} className={inputClass} value={searchText} maxLength={200} onChange={event => setSearchText(event.target.value)} placeholder={`Search ${section}…`} /><button type="submit" aria-label="Search workspace items" className="rounded-lg border border-slate-200 px-3 text-slate-500 hover:bg-slate-50"><WorkspaceIcon name="search" className="h-4 w-4" /></button>
             </form>
             <div className="flex flex-wrap items-center gap-2">
               <select aria-label="Sort order" className={`${inputClass} !w-auto`} value={order} onChange={event => changeFilter({ order: event.target.value })}><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select>
-              {(q || status || sourceType !== "all" || entity) && <button className="text-xs font-medium text-blue-700" onClick={() => changeFilter({ q: null, status: null, type: null, entity: null })}>Clear filters</button>}
+              {(q || status || sourceType !== "all" || entity || due) && <button className="text-xs font-medium text-blue-700" onClick={() => changeFilter({ q: null, status: null, type: null, entity: null, due: null })}>Clear filters</button>}
             </div>
           </div>
           {query.error ? <ErrorState className="m-4" message="Could not load workspace items." onRetry={query.retry} /> : !query.data ? <LoadingState label="Loading workspace…" className="p-5" /> : query.data.items.length === 0 ? <div className="px-5 py-14 text-center"><p className="text-sm font-medium text-slate-700">No items match this view.</p><p className="mt-2 text-xs text-slate-500">{q || status || sourceType !== "all" ? "Try another filter or search." : section === "sources" ? "Sync a connected account or add a note or file." : section === "knowledge" ? "Knowledge proposals appear after extraction from a source." : "Add a task, or review an AI action suggestion from a source."}</p></div> : <ul className="max-h-[68vh] divide-y divide-slate-100 overflow-y-auto">

@@ -22,7 +22,6 @@ import type {
   SuggestedArtifact,
 } from "@/api";
 import { ErrorState, SafetyRefusal } from "@/components/feedback";
-import OperationalSupportDisclaimer from "@/components/OperationalSupportDisclaimer";
 
 interface ChatTurn {
   id: string;
@@ -89,11 +88,38 @@ export function AnswerText({ answer, citations }: { answer: string; citations: C
   citations.forEach((citation, index) => {
     text = text.split(`(id=${citation.source_id})`).join(`[${index + 1}]`).split(citation.source_id).join(`[${index + 1}]`);
   });
-  return <>{text.split(/(\[\d+\])/g).map((part, index) => {
+  text = text.replace(/\n\s*[-*]?\s*(?:\*\*)?ID(?:\*\*)?\s*:\s*(\[\d+\])/gi, " $1");
+  const inline = (value: string) => value.split(/(\*\*[^*]+\*\*|\[\d+\])/g).map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
     const number = /^\[(\d+)\]$/.exec(part);
     const citation = number ? citations[Number(number[1]) - 1] : undefined;
     return citation ? <Link key={index} to={citation.deep_link} title={citation.title} aria-label={`Source ${number![1]}: ${citation.title}`} className="font-medium text-blue-700 hover:underline">{part}</Link> : part;
-  })}</>;
+  });
+  // Render text as React nodes only. Never interpret model HTML or arbitrary URLs.
+  const blocks: React.ReactNode[] = [];
+  const lines = text.split(/\n/);
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index].trim();
+    if (!line) continue;
+    const numbered = /^\d+\.\s+/.test(line);
+    const bullet = /^[-*]\s+/.test(line);
+    if (numbered || bullet) {
+      const entries: React.ReactNode[] = [];
+      const pattern = numbered ? /^\d+\.\s+/ : /^[-*]\s+/;
+      const start = Number.parseInt(line, 10);
+      let cursor = index;
+      while (cursor < lines.length) {
+        const current = lines[cursor].trim();
+        if (!current && cursor + 1 < lines.length && pattern.test(lines[cursor + 1].trim())) { cursor++; continue; }
+        if (!pattern.test(current)) break;
+        entries.push(<li key={cursor}>{inline(current.replace(pattern, ""))}</li>);
+        cursor++;
+      }
+      blocks.push(numbered ? <ol key={index} start={start} className="my-2 list-decimal space-y-2 pl-5">{entries}</ol> : <ul key={index} className="my-2 list-disc space-y-2 pl-5">{entries}</ul>);
+      index = cursor - 1;
+    } else blocks.push(<p className="my-2" key={index}>{inline(line)}</p>);
+  }
+  return <>{blocks}</>;
 }
 
 interface ArtifactCardProps {
@@ -193,9 +219,9 @@ function AnswerCard({
         ) : (
           <>
             {response.answer ? (
-              <p className="whitespace-pre-line break-words text-sm leading-relaxed text-slate-800">
+              <div className="break-words text-sm leading-relaxed text-slate-800">
                 <AnswerText answer={response.answer} citations={response.citations} />
-              </p>
+              </div>
             ) : null}
             <CitationList citations={response.citations} />
             {response.suggested_artifact ? (
@@ -316,7 +342,6 @@ export default function CopilotPage({ embedded = false }: { embedded?: boolean }
         <p className={`mt-1 ${embedded ? "text-xs" : "text-sm"} text-slate-500`}>
           {embedded ? "Answers use saved workspace data. Open a citation to check its source." : "Ask about your saved, permitted data. Check the cited evidence; actions require your confirmation."}
         </p>
-        {!embedded && <OperationalSupportDisclaimer variant="banner" className="mt-3" />}
       </header>
 
       <div ref={transcript} role="log" aria-label="Copilot conversation" aria-live="polite" onScroll={() => {
