@@ -75,7 +75,8 @@ from app.core.services.ai_provider import (
     MockAIProvider,
 )
 from app.core.services.audit_service import AuditService
-from app.dependencies import not_found, scope_select
+from app.dependencies import not_found
+from app.core.ownership import PersonalScope
 
 #: Audit action type recorded when a knowledge item is confirmed (Requirement 7.1).
 CONFIRM_KNOWLEDGE = "CONFIRM_KNOWLEDGE"
@@ -114,10 +115,10 @@ def _conflict(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
-class KnowledgeService:
+class KnowledgeService(PersonalScope):
     """Extract evidence-backed knowledge behind privacy/sensitivity gates."""
 
-    def __init__(self, db: Session, audit: AuditService | None = None) -> None:
+    def __init__(self, db: Session, audit: AuditService | None = None, *, owner_id: UUID) -> None:
         """Bind the service to a request-scoped session.
 
         Args:
@@ -130,6 +131,9 @@ class KnowledgeService:
                 same transaction. Defaults to a fresh instance bound to ``db``.
         """
 
+        if owner_id is None:
+            raise ValueError("A personal workspace owner is required.")
+        self.owner_id = owner_id
         self.db = db
         self.audit = audit or AuditService(db)
 
@@ -138,7 +142,7 @@ class KnowledgeService:
     def _get_item(self, org_id: UUID, item_id: UUID) -> SourceItem:
         """Resolve an org-scoped source item or raise ``404`` (Requirement 2.3)."""
 
-        stmt = scope_select(select(SourceItem), SourceItem, org_id).where(
+        stmt = self._scope(select(SourceItem), SourceItem, org_id).where(
             SourceItem.id == item_id
         )
         item = self.db.execute(stmt).scalar_one_or_none()
@@ -146,16 +150,18 @@ class KnowledgeService:
             raise not_found("Source item not found.")
         return item
 
-    def _get_knowledge(self, org_id: UUID, knowledge_id: UUID) -> KnowledgeItem:
+    def _get_knowledge(self, org_id: UUID, knowledge_id: UUID, *, lock: bool = False) -> KnowledgeItem:
         """Resolve an org-scoped knowledge item or raise ``404`` (Requirement 2.3).
 
         A missing row or one belonging to another tenant is indistinguishable
         and yields ``404`` so the system never reveals another org's data.
         """
 
-        stmt = scope_select(select(KnowledgeItem), KnowledgeItem, org_id).where(
+        stmt = self._scope(select(KnowledgeItem), KnowledgeItem, org_id).where(
             KnowledgeItem.id == knowledge_id
         )
+        if lock:
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
         knowledge = self.db.execute(stmt).scalar_one_or_none()
         if knowledge is None:
             raise not_found("Knowledge item not found.")
@@ -202,7 +208,7 @@ class KnowledgeService:
         """
 
         stmt = (
-            scope_select(select(BusinessEntity), BusinessEntity, org_id)
+            self._scope(select(BusinessEntity), BusinessEntity, org_id)
             .where(BusinessEntity.name == suggestion.name)
             .where(BusinessEntity.entity_type == suggestion.entity_type)
         )
@@ -212,6 +218,7 @@ class KnowledgeService:
 
         entity = BusinessEntity(
             organization_id=org_id,
+            workspace_owner_id=self.owner_id,
             entity_type=suggestion.entity_type,
             name=suggestion.name,
         )
@@ -310,6 +317,7 @@ class KnowledgeService:
 
         knowledge = KnowledgeItem(
             organization_id=org_id,
+            workspace_owner_id=self.owner_id,
             business_entity_id=entity.id if entity is not None else None,
             source_item_id=item.id,
             summary=output.summary,
@@ -356,8 +364,14 @@ class KnowledgeService:
                 organization.
         """
 
-        knowledge = self._get_knowledge(org_id, knowledge_id)
-
+        self._require_actor(actor_id)
+        knowledge = self._get_knowledge(org_id, knowledge_id, lock=True)
+        if knowledge.status == SuggestionStatus.CONFIRMED:
+            return knowledge
+        if knowledge.status != SuggestionStatus.SUGGESTED:
+            raise HTTPException(status_code=409, detail="Only a pending suggestion can be approved.")
+        if not (knowledge.evidence_text or "").strip():
+            raise HTTPException(status_code=409, detail="Evidence is required before approval.")
         knowledge.status = SuggestionStatus.CONFIRMED
         self.db.add(knowledge)
 
@@ -402,10 +416,16 @@ class KnowledgeService:
                 organization.
         """
 
-        knowledge = self._get_knowledge(org_id, knowledge_id)
-
+        self._require_actor(actor_id)
+        knowledge = self._get_knowledge(org_id, knowledge_id, lock=True)
+        if knowledge.status == SuggestionStatus.REJECTED:
+            return knowledge
+        if knowledge.status != SuggestionStatus.SUGGESTED:
+            raise HTTPException(status_code=409, detail="Approved knowledge cannot be rejected as a pending suggestion.")
         knowledge.status = SuggestionStatus.REJECTED
         self.db.add(knowledge)
+        self.audit.record(org_id=org_id, actor_id=actor_id, action_type="REJECT_KNOWLEDGE",
+            target_type="KnowledgeItem", target_id=knowledge.id)
         self.db.flush()
         return knowledge
 
@@ -428,6 +448,7 @@ class KnowledgeService:
         Raises:
             HTTPException: ``404`` if the item does not exist for the org.
         """
+        self._require_actor(actor_id)
 
         knowledge = self._get_knowledge(org_id, knowledge_id)
 
@@ -479,7 +500,7 @@ class KnowledgeService:
 
         filters = filters or KnowledgeListFilter()
 
-        stmt = scope_select(select(KnowledgeItem), KnowledgeItem, org_id)
+        stmt = self._scope(select(KnowledgeItem), KnowledgeItem, org_id)
         if filters.business_entity_id is not None:
             stmt = stmt.where(
                 KnowledgeItem.business_entity_id == filters.business_entity_id
@@ -527,7 +548,7 @@ class KnowledgeService:
 
         # Linked actions: directly via knowledge_item_id, or via the shared
         # business entity when this knowledge is connected to one.
-        action_stmt = scope_select(select(ActionItem), ActionItem, org_id)
+        action_stmt = self._scope(select(ActionItem), ActionItem, org_id)
         if entity_id is not None:
             action_stmt = action_stmt.where(
                 or_(
@@ -548,7 +569,7 @@ class KnowledgeService:
         decisions: list[DecisionRecord] = []
         if entity_id is not None:
             decision_stmt = (
-                scope_select(select(DecisionRecord), DecisionRecord, org_id)
+                self._scope(select(DecisionRecord), DecisionRecord, org_id)
                 .where(DecisionRecord.business_entity_id == entity_id)
                 .order_by(DecisionRecord.decided_at.desc(), DecisionRecord.id.desc())
             )

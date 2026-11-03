@@ -8,7 +8,7 @@ from tests.test_cwi_calendar_routes import cwi_client, fake_calendar, _login, _c
 def test_delete_action_preserves_independent_calendar_control(cwi_client, db_session, seeded_user, fake_calendar):
     _login(cwi_client, seeded_user)
     connection_id = _connect_calendar(cwi_client)
-    action = _make_action(db_session, seeded_user['user'].organization_id)
+    action = _make_action(db_session, seeded_user['user'].organization_id, seeded_user['user'].id)
     result = cwi_client.post(f'/api/actions/{action.id}/add-to-calendar', json={
         'connection_id': connection_id, 'google_calendar_id': 'primary',
         'all_day': True, 'all_day_date': '2026-10-03',

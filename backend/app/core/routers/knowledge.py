@@ -54,7 +54,7 @@ def list_knowledge(
     status: SuggestionStatus | None = None,
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[KnowledgeItemResponse]:
     """Return the organization's knowledge items, newest first (Requirement 7.3).
 
@@ -66,7 +66,7 @@ def list_knowledge(
     filters = KnowledgeListFilter(
         business_entity_id=business_entity_id, status=status
     )
-    items = KnowledgeService(db).list_for_entity(organization_id, filters)
+    items = KnowledgeService(db, owner_id=user.id).list_for_entity(organization_id, filters)
     return [KnowledgeItemResponse.model_validate(item) for item in items]
 
 
@@ -75,7 +75,7 @@ def get_knowledge_detail(
     knowledge_id: UUID,
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> KnowledgeDetailResponse:
     """Return a knowledge item plus its linked actions and decisions.
 
@@ -84,7 +84,7 @@ def get_knowledge_detail(
     non-existent or cross-tenant id yields ``404`` (Requirement 2.3).
     """
 
-    knowledge, actions, decisions = KnowledgeService(db).get_detail(
+    knowledge, actions, decisions = KnowledgeService(db, owner_id=user.id).get_detail(
         organization_id, knowledge_id
     )
     return KnowledgeDetailResponse(
@@ -110,7 +110,7 @@ def confirm_knowledge(
     yields ``404`` (Requirement 2.3).
     """
 
-    knowledge = KnowledgeService(db).confirm(organization_id, knowledge_id, user.id)
+    knowledge = KnowledgeService(db, owner_id=user.id).confirm(organization_id, knowledge_id, user.id)
     return KnowledgeItemResponse.model_validate(knowledge)
 
 
@@ -128,7 +128,7 @@ def reject_knowledge(
     yields ``404`` (Requirement 2.3).
     """
 
-    knowledge = KnowledgeService(db).reject(organization_id, knowledge_id, user.id)
+    knowledge = KnowledgeService(db, owner_id=user.id).reject(organization_id, knowledge_id, user.id)
     return KnowledgeItemResponse.model_validate(knowledge)
 
 
@@ -150,5 +150,5 @@ def delete_knowledge(
     transaction. A non-existent or cross-tenant id yields ``404``.
     """
 
-    KnowledgeService(db).delete(organization_id, knowledge_id, user.id)
+    KnowledgeService(db, owner_id=user.id).delete(organization_id, knowledge_id, user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

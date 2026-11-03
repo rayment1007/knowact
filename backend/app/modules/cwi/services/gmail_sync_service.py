@@ -62,6 +62,8 @@ from app.core.services.audit_service import AuditService
 from app.core.services.classification_service import ClassificationService
 from app.core.services.ingestion_service import IngestionService
 from app.dependencies import not_found, scope_select
+from app.core.models import BusinessEntity
+from app.core.ownership import scope_owned_select
 from app.modules.cwi.models import (
     EmailMessageRecord,
     EmailDraft,
@@ -166,8 +168,6 @@ class GmailSyncService:
         self.settings = settings or get_settings()
         self._integration_service = integration_service
         self._classifier = classifier or MockAIProvider().classify_source_item
-        self.ingestion = IngestionService(db)
-        self.classification = ClassificationService(db)
         self.audit = AuditService(db)
 
     # -- Scoped lookups -----------------------------------------------------
@@ -319,7 +319,7 @@ class GmailSyncService:
         received = message.received_at
         if received.tzinfo is None:
             received = received.replace(tzinfo=timezone.utc)
-        source_item = self.ingestion.ingest(
+        source_item = IngestionService(self.db, owner_id=connection.user_id).ingest(
             org_id,
             connection.user_id,
             SourceItemCreate(
@@ -384,7 +384,7 @@ class GmailSyncService:
 
             classifier = signalled_classifier
 
-        classification = self.classification.classify(
+        classification = ClassificationService(self.db, owner_id=connection.user_id).classify(
             org_id, source_item.id, classifier=classifier
         )
 
@@ -725,10 +725,12 @@ class GmailSyncService:
         """
 
         suggestion = self._get_task_suggestion(org_id, user_id, suggestion_id)
+        self._validate_entity(org_id, user_id, suggestion.business_entity_id)
         suggestion.status = SuggestionStatus.CONFIRMED
 
         action = ActionItem(
             organization_id=org_id,
+            workspace_owner_id=user_id,
             business_entity_id=suggestion.business_entity_id,
             title=suggestion.title,
             description=suggestion.description,
@@ -755,6 +757,12 @@ class GmailSyncService:
         self.db.flush()
         return suggestion, action
 
+    def _validate_entity(self, org_id: UUID, user_id: UUID, entity_id: UUID | None) -> None:
+        if entity_id is not None and self.db.scalar(scope_owned_select(
+            select(BusinessEntity), BusinessEntity, org_id, user_id
+        ).where(BusinessEntity.id == entity_id)) is None:
+            raise not_found("Business entity not found.")
+
     def edit_task_suggestion(
         self,
         org_id: UUID,
@@ -778,6 +786,8 @@ class GmailSyncService:
 
         suggestion = self._get_task_suggestion(org_id, user_id, suggestion_id)
         fields = _fields_set or set()
+        if "business_entity_id" in fields:
+            self._validate_entity(org_id, user_id, business_entity_id)
         if "title" in fields and title is not None:
             suggestion.title = title
         if "description" in fields:

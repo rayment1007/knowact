@@ -117,10 +117,11 @@ def _seed_org(db: Session) -> tuple[core_models.Organization, core_models.User]:
     return org, user
 
 
-def _seed_confirmed_knowledge(db: Session, org_id) -> UUID:
+def _seed_confirmed_knowledge(db: Session, org_id, owner_id) -> UUID:
     suffix = uuid4().hex
     item = core_models.KnowledgeItem(
         organization_id=org_id,
+        workspace_owner_id=owner_id,
         summary=f"Confirmed fact {suffix}",
         key_points=["fact"],
         evidence_text=f"Evidence {suffix}",
@@ -166,7 +167,7 @@ def test_citations_are_always_grounded_in_the_evidence_set(
 
     # The bounded evidence: N confirmed, org-scoped knowledge items.
     evidence_ids = [
-        _seed_confirmed_knowledge(db_session, org.id) for _ in range(n_evidence)
+        _seed_confirmed_knowledge(db_session, org.id, user.id) for _ in range(n_evidence)
     ]
 
     # The LLM cites a subset of the real evidence ids PLUS fabricated ids that

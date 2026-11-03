@@ -140,7 +140,7 @@ interface DraftDetailProps {
   onDelete: (draft: EmailDraft) => void;
 }
 
-function DraftDetail({
+export function DraftDetail({
   draft,
   busy,
   actionError,
@@ -176,7 +176,8 @@ function DraftDetail({
   }, [draft.id, draft.to_recipients]);
 
   const editable =
-    draft.status === "AI_SUGGESTED" || draft.status === "USER_APPROVED";
+    draft.status === "AI_SUGGESTED" || draft.status === "USER_APPROVED" ||
+    draft.status === "GMAIL_DRAFT_CREATED";
   // Recipients can be set until the draft is in-flight/terminal (matches the
   // backend edit guard).
   const recipientEditable =
@@ -197,6 +198,10 @@ function DraftDetail({
     draft.to_recipients.length > 0;
   const dirty = subject !== draft.subject || bodyText !== draft.body_text;
   const recipientDirty = recipientInput.trim() !== draft.to_recipients.join(", ");
+  const hasUnsavedChanges = dirty || recipientDirty;
+  useEffect(() => {
+    setConfirmingSend(false);
+  }, [subject, bodyText, recipientInput, draft.status]);
   // Show "Open in Gmail" once a real Gmail draft exists for this record.
   const gmailDraftUrl = draft.gmail_draft_id ? GMAIL_DRAFTS_URL : null;
 
@@ -331,11 +336,12 @@ function DraftDetail({
       </div>
 
       {actionError ? <ErrorState message={actionError} variant="alert" /> : null}
+      {hasUnsavedChanges ? <p className="text-sm text-amber-700">Save your changes before approving or sending.</p> : null}
 
       <div className="flex flex-wrap items-center gap-2 border-t border-slate-200 pt-4">
         <button
           type="button"
-          disabled={!canApprove || busy}
+          disabled={!canApprove || busy || hasUnsavedChanges}
           onClick={() => onApprove(draft)}
           className="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
         >
@@ -343,11 +349,11 @@ function DraftDetail({
         </button>
         <button
           type="button"
-          disabled={!canCreateGmailDraft || busy}
+          disabled={!canCreateGmailDraft || busy || hasUnsavedChanges}
           onClick={() => onCreateGmailDraft(draft)}
           className="rounded-md border border-indigo-300 px-3 py-1.5 text-sm font-medium text-indigo-700 transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          Create Gmail draft
+          {draft.gmail_draft_id ? "Update Gmail draft" : "Create Gmail draft"}
         </button>
         <button
           type="button"
@@ -374,7 +380,7 @@ function DraftDetail({
           ) : !confirmingSend ? (
             <button
               type="button"
-              disabled={!canSend || busy}
+              disabled={!canSend || busy || hasUnsavedChanges}
               onClick={() => setConfirmingSend(true)}
               className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
@@ -387,7 +393,7 @@ function DraftDetail({
               </span>
               <button
                 type="button"
-                disabled={busy}
+                disabled={!canSend || busy || hasUnsavedChanges}
                 onClick={() => onSend(draft)}
                 className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-60"
               >

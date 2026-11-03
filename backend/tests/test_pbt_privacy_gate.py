@@ -199,7 +199,7 @@ def test_privacy_gate_never_produces_knowledge(
     org, user = _make_org_and_user(db_session, f"{uuid4().hex}@example.com")
     item = _make_item(db_session, org, user, title=title, content=content)
     _classify_confirmed(db_session, item, relevance=relevance)
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=user.id)
 
     before = _knowledge_count_for_item(db_session, item.id)
 

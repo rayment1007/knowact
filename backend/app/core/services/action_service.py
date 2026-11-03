@@ -44,7 +44,8 @@ from app.core.models import (
 )
 from app.core.schemas import ActionCreate, ActionListFilter, ActionUpdate
 from app.core.services.audit_service import AuditService
-from app.dependencies import not_found, scope_select
+from app.dependencies import not_found
+from app.core.ownership import PersonalScope
 
 #: Audit action type recorded when an action item is created (Requirements 8.1, 13.1).
 CREATE_ACTION = "CREATE_ACTION"
@@ -65,10 +66,10 @@ def _conflict(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
-class ActionService:
+class ActionService(PersonalScope):
     """Create and manage action items for an organization (Requirement 8)."""
 
-    def __init__(self, db: Session, audit: AuditService | None = None) -> None:
+    def __init__(self, db: Session, audit: AuditService | None = None, *, owner_id: UUID) -> None:
         """Bind the service to a request-scoped session.
 
         Args:
@@ -80,6 +81,9 @@ class ActionService:
                 same transaction. Defaults to a fresh instance bound to ``db``.
         """
 
+        if owner_id is None:
+            raise ValueError("A personal workspace owner is required.")
+        self.owner_id = owner_id
         self.db = db
         self.audit = audit or AuditService(db)
 
@@ -92,7 +96,7 @@ class ActionService:
         and yields ``404`` so the system never reveals another org's data.
         """
 
-        stmt = scope_select(select(ActionItem), ActionItem, org_id).where(
+        stmt = self._scope(select(ActionItem), ActionItem, org_id).where(
             ActionItem.id == action_id
         )
         action = self.db.execute(stmt).scalar_one_or_none()
@@ -112,7 +116,7 @@ class ActionService:
         be spawned from an unconfirmed suggestion.
         """
 
-        stmt = scope_select(select(KnowledgeItem), KnowledgeItem, org_id).where(
+        stmt = self._scope(select(KnowledgeItem), KnowledgeItem, org_id).where(
             KnowledgeItem.id == knowledge_id
         )
         knowledge = self.db.execute(stmt).scalar_one_or_none()
@@ -157,8 +161,13 @@ class ActionService:
         committed — the caller's transaction commits both together.
         """
 
+        self._require_actor(actor_id)
+        self._require_entity(org_id, business_entity_id)
+        if owner_id is not None and owner_id != self.owner_id:
+            raise not_found("Action owner not found.")
         action = ActionItem(
             organization_id=org_id,
+            workspace_owner_id=self.owner_id,
             business_entity_id=business_entity_id,
             knowledge_item_id=knowledge_item_id,
             title=title,
@@ -227,6 +236,7 @@ class ActionService:
             HTTPException: ``404`` if a referenced knowledge item does not exist
                 for the organization; ``409`` if it exists but is not confirmed.
         """
+        self._require_actor(actor_id)
 
         if payload.knowledge_item_id is not None:
             return self.create_from_suggestion(org_id, actor_id, payload)
@@ -274,6 +284,7 @@ class ActionService:
         Returns:
             The persisted (flushed) ``OPEN`` :class:`ActionItem`.
         """
+        self._require_actor(actor_id)
 
         knowledge = self._get_confirmed_knowledge(org_id, payload.knowledge_item_id)
 
@@ -331,7 +342,11 @@ class ActionService:
             HTTPException: ``404`` if the action does not exist for the org.
         """
 
+        self._require_actor(actor_id)
         action = self._get_action(org_id, action_id)
+        self._require_entity(org_id, payload.business_entity_id)
+        if payload.owner_id is not None and payload.owner_id != self.owner_id:
+            raise not_found("Action owner not found.")
 
         changes = {field: value for field, value in payload.model_dump(exclude_unset=True).items()
             if getattr(action, field) != value}
@@ -371,6 +386,7 @@ class ActionService:
         Raises:
             HTTPException: ``404`` if the action does not exist for the org.
         """
+        self._require_actor(actor_id)
 
         return self.update(
             org_id, action_id, actor_id, ActionUpdate(status=status)
@@ -396,6 +412,7 @@ class ActionService:
         Raises:
             HTTPException: ``404`` if the action does not exist for the org.
         """
+        self._require_actor(actor_id)
 
         action = self._get_action(org_id, action_id)
 
@@ -449,7 +466,7 @@ class ActionService:
 
         filters = filters or ActionListFilter()
 
-        stmt = scope_select(select(ActionItem), ActionItem, org_id)
+        stmt = self._scope(select(ActionItem), ActionItem, org_id)
         if filters.status is not None:
             stmt = stmt.where(ActionItem.status == filters.status)
         if filters.business_entity_id is not None:

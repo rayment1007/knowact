@@ -15,6 +15,7 @@ Exercises the real FastAPI app against an ephemeral SQLite database (see
 
 from __future__ import annotations
 
+from tests.ownership_fixtures import only_user_id
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -75,7 +76,7 @@ def test_daily_brief_grounded_in_confirmed_knowledge(
     # One CONFIRMED and one SUGGESTED knowledge item: only the confirmed one
     # should ground the brief (Requirement 10.2).
     db_session.add(
-        core_models.KnowledgeItem(
+        core_models.KnowledgeItem(workspace_owner_id=only_user_id(db_session, org_id),
             organization_id=org_id,
             summary="Confirmed insight about roadmap",
             key_points=[],
@@ -85,7 +86,7 @@ def test_daily_brief_grounded_in_confirmed_knowledge(
         )
     )
     db_session.add(
-        core_models.KnowledgeItem(
+        core_models.KnowledgeItem(workspace_owner_id=only_user_id(db_session, org_id),
             organization_id=org_id,
             summary="Suggested but unconfirmed insight",
             key_points=[],

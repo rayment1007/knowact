@@ -78,7 +78,8 @@ from app.core.services.ai_provider import (
     MockAIProvider,
     OrgContext,
 )
-from app.dependencies import not_found, scope_select
+from app.dependencies import not_found
+from app.core.ownership import PersonalScope
 
 # A daily-brief generator turns an assembled :class:`OrgContext` into a
 # structured :class:`DailyBriefOutput`. Routes wrap the provider call in
@@ -121,10 +122,10 @@ def _looks_like_uuid(value: str) -> bool:
     return True
 
 
-class BriefService:
+class BriefService(PersonalScope):
     """Assemble confirmed context and produce daily / entity briefs (Req 10)."""
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, *, owner_id: UUID) -> None:
         """Bind the service to a request-scoped session.
 
         Args:
@@ -134,6 +135,9 @@ class BriefService:
                 :class:`Brief`.
         """
 
+        if owner_id is None:
+            raise ValueError("A personal workspace owner is required.")
+        self.owner_id = owner_id
         self.db = db
 
     # -- Context assembly (the Learn loop, Requirement 10.2) ----------------
@@ -148,7 +152,7 @@ class BriefService:
         result is further narrowed to that business entity (Requirement 10.5).
         """
 
-        stmt = scope_select(select(KnowledgeItem), KnowledgeItem, org_id).where(
+        stmt = self._scope(select(KnowledgeItem), KnowledgeItem, org_id).where(
             KnowledgeItem.status == SuggestionStatus.CONFIRMED
         )
         if entity_id is not None:
@@ -166,7 +170,7 @@ class BriefService:
         (Requirements 10.1, 10.5). Optionally narrowed to one business entity.
         """
 
-        stmt = scope_select(select(ActionItem), ActionItem, org_id).where(
+        stmt = self._scope(select(ActionItem), ActionItem, org_id).where(
             ActionItem.status.in_(_OPEN_ACTION_STATUSES)
         )
         if entity_id is not None:
@@ -185,7 +189,7 @@ class BriefService:
         (Requirement 10.1). Optionally narrowed to one business entity.
         """
 
-        stmt = scope_select(select(DecisionRecord), DecisionRecord, org_id)
+        stmt = self._scope(select(DecisionRecord), DecisionRecord, org_id)
         if entity_id is not None:
             stmt = stmt.where(DecisionRecord.business_entity_id == entity_id)
         stmt = stmt.order_by(
@@ -347,7 +351,7 @@ class BriefService:
         (Requirement 2.3).
         """
 
-        stmt = scope_select(select(BusinessEntity), BusinessEntity, org_id).where(
+        stmt = self._scope(select(BusinessEntity), BusinessEntity, org_id).where(
             BusinessEntity.id == entity_id
         )
         entity = self.db.execute(stmt).scalar_one_or_none()
@@ -383,6 +387,7 @@ class BriefService:
         Returns:
             The persisted (flushed) ``DAILY`` :class:`Brief`.
         """
+        self._require_actor(user_id)
 
         context = self._build_org_context(org_id)
         run = generator or MockAIProvider().generate_daily_brief
@@ -439,6 +444,7 @@ class BriefService:
             HTTPException: ``404`` if the entity does not exist for the
                 organization.
         """
+        self._require_actor(user_id)
 
         entity = self._get_entity(org_id, entity_id)
 

@@ -170,7 +170,7 @@ def test_confirm_writes_exactly_one_audit_in_same_transaction(
     )
     item = _make_item(db_session, org, user, title=title, content=content)
 
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
     service.classify(org.id, item.id)
 
     # No confirm audit row exists before confirming.

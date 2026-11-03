@@ -74,6 +74,7 @@ from app.core.models import (
     SourceItem,
 )
 from app.core.services.audit_service import AuditService
+from app.core.ownership import owner_predicate, scope_owned_select
 from app.dependencies import not_found, scope_select
 from app.modules.cwi.models import (
     CopilotAnswerLog,
@@ -239,14 +240,24 @@ class PrivacyService:
         )
         result = EmailDeletionResult()
         record_ids_resolved = [record.id for record in records]
-        for record in records:
+        for record in sorted(records, key=lambda record: (str(record.integration_connection_id), str(record.id))):
             connection = self.db.scalar(select(IntegrationConnection).where(
                 IntegrationConnection.id == record.integration_connection_id).with_for_update())
+        # Fact capture/review locks the email before its extracted SourceItem.
+        # Acquire those locks before the availability hook and physical delete.
+        records = list(self.db.scalars(select(EmailMessageRecord).where(
+            EmailMessageRecord.organization_id == org_id,
+            EmailMessageRecord.id.in_(record_ids_resolved),
+        ).order_by(EmailMessageRecord.id).with_for_update().execution_options(populate_existing=True)))
+        record_ids_resolved = [record.id for record in records]
         source_item_ids = [
             record.source_item_id
             for record in records
             if record.source_item_id is not None
         ]
+        source_item_ids = list(self.db.scalars(scope_owned_select(
+            select(SourceItem.id), SourceItem, org_id, user_id,
+        ).where(SourceItem.id.in_(source_item_ids))))
 
         if not record_ids_resolved:
             # Nothing matched; still record the (no-op) deletion request so the
@@ -265,7 +276,15 @@ class PrivacyService:
             self.db.flush()
             return result
 
+        from app.core.services.fact_lifecycle import mark_fact_sources_removed
         from app.modules.cwi.services.source_proposal_service import discard_unapproved
+        list(self.db.scalars(select(SourceItem).where(SourceItem.organization_id == org_id,
+            SourceItem.created_by == user_id, SourceItem.id.in_(source_item_ids))
+            .order_by(SourceItem.id).with_for_update()))
+        mark_fact_sources_removed(self.db, org_id=org_id, owner_id=user_id,
+            source_kind="email", source_ids=record_ids_resolved)
+        mark_fact_sources_removed(self.db, org_id=org_id, owner_id=user_id,
+            source_kind="source", source_ids=source_item_ids)
         discard_unapproved(self.db, org_id, "email", record_ids_resolved)
         discard_unapproved(self.db, org_id, "source", source_item_ids)
 
@@ -285,19 +304,18 @@ class PrivacyService:
 
         # 2) Invalidate derived chunks/embeddings/vector refs + on-demand
         #    retrieval (defensive: emails normally produce none).
-        result.deleted_chunks = self._delete_derived_chunks(
-            org_id, source_item_ids
-        )
-
-        # 3) Mark provenance on any derived DocumentAsset (defensive).
+        # Resolve provenance before removing the chunks containing that link.
         result.marked_documents_source_deleted = (
-            self._mark_derived_documents_source_deleted(org_id, source_item_ids)
+            self._mark_derived_documents_source_deleted(org_id, user_id, source_item_ids)
+        )
+        result.deleted_chunks = self._delete_derived_chunks(
+            org_id, user_id, source_item_ids
         )
 
         # 4) Count the confirmed derived business records we RETAIN, so the
         #    audit row preserves the "source deleted" provenance (Req 33.8).
         result.retained_derived_records = self._count_retained_derived_records(
-            org_id, source_item_ids
+            org_id, user_id, source_item_ids
         )
 
         # 5) Delete the selected email records themselves.
@@ -325,6 +343,7 @@ class PrivacyService:
                 sa_update(KnowledgeItem)
                 .where(
                     KnowledgeItem.organization_id == org_id,
+                    owner_predicate(KnowledgeItem, user_id),
                     KnowledgeItem.source_item_id.in_(owned_source_ids),
                 )
                 .values(source_item_id=None)
@@ -375,7 +394,7 @@ class PrivacyService:
         return result
 
     def _delete_derived_chunks(
-        self, org_id: UUID, source_item_ids: list[UUID]
+        self, org_id: UUID, user_id: UUID, source_item_ids: list[UUID]
     ) -> int:
         """Delete chunks/embeddings whose metadata references the sources.
 
@@ -389,7 +408,7 @@ class PrivacyService:
         if not source_item_ids:
             return 0
         wanted = {str(sid) for sid in source_item_ids}
-        stmt = scope_select(select(DocumentChunk), DocumentChunk, org_id)
+        stmt = self._owned_chunks(org_id, user_id)
         deleted = 0
         for chunk in self.db.execute(stmt).scalars().all():
             metadata = chunk.metadata_json or {}
@@ -402,7 +421,7 @@ class PrivacyService:
         return deleted
 
     def _mark_derived_documents_source_deleted(
-        self, org_id: UUID, source_item_ids: list[UUID]
+        self, org_id: UUID, user_id: UUID, source_item_ids: list[UUID]
     ) -> int:
         """Mark any DocumentAsset derived from the sources ``source_deleted``.
 
@@ -414,7 +433,7 @@ class PrivacyService:
         if not source_item_ids:
             return 0
         wanted = {str(sid) for sid in source_item_ids}
-        chunk_stmt = scope_select(select(DocumentChunk), DocumentChunk, org_id)
+        chunk_stmt = self._owned_chunks(org_id, user_id)
         asset_ids: set[UUID] = set()
         for chunk in self.db.execute(chunk_stmt).scalars().all():
             metadata = chunk.metadata_json or {}
@@ -426,6 +445,7 @@ class PrivacyService:
         update_result = self.db.execute(
             sa_update(DocumentAsset)
             .where(DocumentAsset.organization_id == org_id)
+            .where(DocumentAsset.uploaded_by == user_id)
             .where(DocumentAsset.id.in_(asset_ids))
             .where(DocumentAsset.source_deleted.is_(False))
             .values(source_deleted=True)
@@ -434,7 +454,7 @@ class PrivacyService:
         return int(update_result.rowcount or 0)
 
     def _count_retained_derived_records(
-        self, org_id: UUID, source_item_ids: list[UUID]
+        self, org_id: UUID, user_id: UUID, source_item_ids: list[UUID]
     ) -> int:
         """Count confirmed business records derived from the deleted sources.
 
@@ -449,20 +469,28 @@ class PrivacyService:
             return 0
         knowledge_ids = list(
             self.db.execute(
-                scope_select(
-                    select(KnowledgeItem.id), KnowledgeItem, org_id
+                scope_owned_select(
+                    select(KnowledgeItem.id), KnowledgeItem, org_id, user_id
                 ).where(KnowledgeItem.source_item_id.in_(source_item_ids))
             ).scalars().all()
         )
         count = len(knowledge_ids)
         if knowledge_ids:
             action_count = self.db.execute(
-                scope_select(
-                    select(ActionItem.id), ActionItem, org_id
+                scope_owned_select(
+                    select(ActionItem.id), ActionItem, org_id, user_id
                 ).where(ActionItem.knowledge_item_id.in_(knowledge_ids))
             ).scalars().all()
             count += len(list(action_count))
         return count
+
+    def _owned_chunks(self, org_id: UUID, user_id: UUID):
+        return select(DocumentChunk).join(DocumentAsset,
+            DocumentAsset.id == DocumentChunk.document_asset_id).where(
+            DocumentChunk.organization_id == org_id,
+            DocumentAsset.organization_id == org_id,
+            DocumentAsset.uploaded_by == user_id,
+        )
 
     # -- Delete uploaded documents (Requirements 33.4, 33.9) ----------------
 

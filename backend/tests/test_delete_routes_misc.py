@@ -7,6 +7,7 @@ and decision.
 
 from __future__ import annotations
 
+from tests.ownership_fixtures import only_user_id
 from datetime import datetime, timezone
 from typing import Any
 
@@ -59,7 +60,7 @@ def test_delete_knowledge_detaches_actions_and_audits(
     _login(client, seeded_user["email"], seeded_user["password"])
     org_id = seeded_user["organization"].id
 
-    knowledge = core_models.KnowledgeItem(
+    knowledge = core_models.KnowledgeItem(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id,
         summary="Fact",
         key_points=[],
@@ -69,7 +70,7 @@ def test_delete_knowledge_detaches_actions_and_audits(
     )
     db_session.add(knowledge)
     db_session.flush()
-    action = core_models.ActionItem(
+    action = core_models.ActionItem(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id,
         knowledge_item_id=knowledge.id,
         title="Do it",
@@ -92,7 +93,7 @@ def test_cross_org_knowledge_delete_404(
     client: TestClient, seeded_user: dict[str, Any], db_session: Session
 ) -> None:
     _login(client, seeded_user["email"], seeded_user["password"])
-    knowledge = core_models.KnowledgeItem(
+    knowledge = core_models.KnowledgeItem(workspace_owner_id=only_user_id(db_session, seeded_user["organization"].id),
         organization_id=seeded_user["organization"].id,
         summary="Fact",
         key_points=[],
@@ -121,7 +122,7 @@ def test_delete_action_and_decision_audit(
     org_id = seeded_user["organization"].id
     user_id = seeded_user["user"].id
 
-    action = core_models.ActionItem(
+    action = core_models.ActionItem(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id, title="A", status=core_models.ActionStatus.OPEN
     )
     decision = core_models.DecisionRecord(
@@ -154,7 +155,7 @@ def test_cross_org_action_and_decision_delete_404(
     org_id = seeded_user["organization"].id
     user_id = seeded_user["user"].id
 
-    action = core_models.ActionItem(
+    action = core_models.ActionItem(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id, title="A", status=core_models.ActionStatus.OPEN
     )
     decision = core_models.DecisionRecord(

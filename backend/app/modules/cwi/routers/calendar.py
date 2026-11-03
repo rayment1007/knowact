@@ -64,6 +64,10 @@ def remove_calendar_source(source_id: UUID, db: Session = Depends(get_db),
         IntegrationConnection.id == row.integration_connection_id,
         IntegrationConnection.organization_id == user.organization_id,
         IntegrationConnection.user_id == user.id).with_for_update()).scalar_one()
+    row, _ = _source(db, user, "calendar", source_id, lock=True)
+    from app.core.services.fact_lifecycle import mark_fact_sources_removed
+    mark_fact_sources_removed(db, org_id=user.organization_id, owner_id=user.id,
+        source_kind="calendar", source_ids=[row.id])
     discard_unapproved(db, user.organization_id, "calendar", [row.id])
     db.delete(row)
     AuditService(db).record(org_id=user.organization_id, actor_id=user.id,

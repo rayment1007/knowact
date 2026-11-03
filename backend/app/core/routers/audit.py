@@ -40,7 +40,7 @@ def list_audit(
     target_id: UUID | None = None,
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
-    _user=Depends(get_current_user),
+    user=Depends(get_current_user),
 ) -> list[AuditLogResponse]:
     """Return the organization's audit entries, newest first.
 
@@ -56,5 +56,5 @@ def list_audit(
         target_type=target_type,
         target_id=target_id,
     )
-    entries = AuditService(db).list(organization_id, filters)
+    entries = AuditService(db).list(organization_id, filters, owner_id=user.id)
     return [AuditLogResponse.model_validate(entry) for entry in entries]

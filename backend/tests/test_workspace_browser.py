@@ -82,12 +82,12 @@ def test_source_and_file_detail_access_and_paged_chunks(client, db_session, seed
 def test_links_use_real_provenance_and_confirmed_email_actions(client, db_session, seeded_user):
     _login(client, seeded_user); user = seeded_user["user"]
     source = note(db_session, user); message = email(db_session, user, source)
-    knowledge = KnowledgeItem(organization_id=user.organization_id, source_item_id=source.id, summary="Extracted fact", knowledge_type="FACT", evidence_text="Original")
+    knowledge = KnowledgeItem(organization_id=user.organization_id, workspace_owner_id=user.id, source_item_id=source.id, summary="Extracted fact", knowledge_type="FACT", evidence_text="Original")
     suggestion = EmailTaskSuggestion(organization_id=user.organization_id, email_message_record_id=message.id, source_item_id=source.id,
         title="Proposed task", gmail_message_id="m1", evidence_text="Original", ai_provider="mock", ai_model="mock")
     db_session.add_all([knowledge, suggestion]); db_session.flush()
-    linked = ActionItem(organization_id=user.organization_id, knowledge_item_id=knowledge.id, title="Linked task", ai_generated=False)
-    unrelated = ActionItem(organization_id=user.organization_id, title="Linked task", evidence_text="Original", ai_generated=False)
+    linked = ActionItem(organization_id=user.organization_id, workspace_owner_id=user.id, knowledge_item_id=knowledge.id, title="Linked task", ai_generated=False)
+    unrelated = ActionItem(organization_id=user.organization_id, workspace_owner_id=user.id, title="Linked task", evidence_text="Original", ai_generated=False)
     db_session.add_all([linked, unrelated]); db_session.flush()
     response = client.get(f"/api/workspace/source/email/{message.id}/links")
     assert response.status_code == 200, response.text
@@ -114,7 +114,7 @@ def test_links_use_real_provenance_and_confirmed_email_actions(client, db_sessio
 ])
 def test_knowledge_actions_are_paged_and_status_filtered(client, db_session, seeded_user, section, model, fields):
     _login(client, seeded_user); user = seeded_user["user"]
-    db_session.add_all([model(organization_id=user.organization_id, **fields) for _ in range(22)]); db_session.flush()
+    db_session.add_all([model(organization_id=user.organization_id, workspace_owner_id=user.id, **fields) for _ in range(22)]); db_session.flush()
     page = client.get(f"/api/workspace/items?section={section}&offset=20&status={fields['status']}").json()
     assert page["total"] == 22 and len(page["items"]) == 2
     assert client.get(f"/api/workspace/items?section={section}&status=SUGGESTED").json()["total"] == 0

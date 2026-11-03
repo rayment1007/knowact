@@ -26,6 +26,7 @@ _Requirements: 2.3_
 
 from __future__ import annotations
 
+from tests.ownership_fixtures import only_user_id
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -108,7 +109,7 @@ def test_org_b_receives_404_for_org_a_rows(
     # A knowledge item seeded directly for org A (extraction requires a
     # confirmed classification; a direct insert keeps this test focused on the
     # isolation of the read/write routes).
-    knowledge = core_models.KnowledgeItem(
+    knowledge = core_models.KnowledgeItem(workspace_owner_id=only_user_id(db_session, org_a_id),
         organization_id=org_a_id,
         summary="Org A knowledge",
         key_points=["secret"],

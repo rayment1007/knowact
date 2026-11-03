@@ -22,6 +22,7 @@ An edge case is included: creating from a non-confirmed knowledge item raises
 
 from __future__ import annotations
 
+from tests.ownership_fixtures import only_user_id
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -68,7 +69,7 @@ def _make_org_and_user(
 def _make_entity(
     db: Session, org: core_models.Organization, name: str
 ) -> BusinessEntity:
-    entity = BusinessEntity(
+    entity = BusinessEntity(workspace_owner_id=only_user_id(db, org.id),
         organization_id=org.id,
         entity_type=BusinessEntityType.PROJECT,
         name=name,
@@ -86,7 +87,7 @@ def _make_knowledge(
     business_entity_id=None,
     evidence_text: str = "Confirmed suggestion evidence.",
 ) -> KnowledgeItem:
-    knowledge = KnowledgeItem(
+    knowledge = KnowledgeItem(workspace_owner_id=only_user_id(db, org.id),
         organization_id=org.id,
         business_entity_id=business_entity_id,
         summary="A recommendation",
@@ -123,7 +124,7 @@ def _count_actions(db: Session, action_id) -> int:
 
 def test_manual_create_is_open(db_session: Session) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
-    service = ActionService(db_session)
+    service = ActionService(db_session, owner_id=user.id)
 
     action = service.create(
         org.id, user.id, ActionCreate(title="Call the client back")
@@ -136,7 +137,7 @@ def test_manual_create_is_open(db_session: Session) -> None:
 def test_create_from_confirmed_suggestion_is_open(db_session: Session) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     knowledge = _make_knowledge(db_session, org)
-    service = ActionService(db_session)
+    service = ActionService(db_session, owner_id=user.id)
 
     action = service.create(
         org.id,
@@ -155,7 +156,7 @@ def test_create_from_confirmed_suggestion_is_open(db_session: Session) -> None:
 
 def test_manual_create_is_human_originated(db_session: Session) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
-    service = ActionService(db_session)
+    service = ActionService(db_session, owner_id=user.id)
 
     action = service.create(org.id, user.id, ActionCreate(title="Manual task"))
 
@@ -173,7 +174,7 @@ def test_from_confirmed_suggestion_is_ai_generated_and_inherits_evidence(
         business_entity_id=entity.id,
         evidence_text="Client asked about estate planning.",
     )
-    service = ActionService(db_session)
+    service = ActionService(db_session, owner_id=user.id)
 
     action = service.create(
         org.id,
@@ -200,7 +201,7 @@ def test_manual_create_writes_exactly_one_create_action_audit(
     db_session: Session,
 ) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
-    service = ActionService(db_session)
+    service = ActionService(db_session, owner_id=user.id)
 
     action = service.create(org.id, user.id, ActionCreate(title="Manual task"))
 
@@ -212,7 +213,7 @@ def test_from_suggestion_writes_exactly_one_create_action_audit(
 ) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     knowledge = _make_knowledge(db_session, org)
-    service = ActionService(db_session)
+    service = ActionService(db_session, owner_id=user.id)
 
     action = service.create(
         org.id,
@@ -243,7 +244,7 @@ def test_action_and_audit_row_commit_or_rollback_together(
     """
 
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
-    service = ActionService(db_session)
+    service = ActionService(db_session, owner_id=user.id)
 
     savepoint = db_session.begin_nested()
     action = service.create(org.id, user.id, ActionCreate(title="Atomic task"))
@@ -270,7 +271,7 @@ def test_create_from_unconfirmed_suggestion_raises_409(db_session: Session) -> N
     knowledge = _make_knowledge(
         db_session, org, status=SuggestionStatus.SUGGESTED
     )
-    service = ActionService(db_session)
+    service = ActionService(db_session, owner_id=user.id)
 
     with pytest.raises(HTTPException) as exc:
         service.create(

@@ -38,7 +38,8 @@ from sqlalchemy.orm import Session
 from app.core.models import DecisionRecord
 from app.core.schemas import DecisionCreate, DecisionListFilter
 from app.core.services.audit_service import AuditService
-from app.dependencies import not_found, scope_select
+from app.dependencies import not_found
+from app.core.ownership import PersonalScope
 
 #: Audit action type recorded when a decision is created (Requirements 9.2, 13.1).
 CREATE_DECISION = "CREATE_DECISION"
@@ -47,10 +48,10 @@ CREATE_DECISION = "CREATE_DECISION"
 DELETE_DECISION = "DELETE_DECISION"
 
 
-class DecisionService:
+class DecisionService(PersonalScope):
     """Record and list decision records for an organization (Requirement 9)."""
 
-    def __init__(self, db: Session, audit: AuditService | None = None) -> None:
+    def __init__(self, db: Session, audit: AuditService | None = None, *, owner_id: UUID) -> None:
         """Bind the service to a request-scoped session.
 
         Args:
@@ -62,6 +63,9 @@ class DecisionService:
                 same transaction. Defaults to a fresh instance bound to ``db``.
         """
 
+        if owner_id is None:
+            raise ValueError("A personal workspace owner is required.")
+        self.owner_id = owner_id
         self.db = db
         self.audit = audit or AuditService(db)
 
@@ -74,7 +78,7 @@ class DecisionService:
         and a record owned by another organization are indistinguishable.
         """
 
-        stmt = scope_select(select(DecisionRecord), DecisionRecord, org_id).where(
+        stmt = self._scope(select(DecisionRecord), DecisionRecord, org_id).where(
             DecisionRecord.id == decision_id
         )
         decision = self.db.execute(stmt).scalar_one_or_none()
@@ -112,6 +116,8 @@ class DecisionService:
             The persisted (flushed) :class:`DecisionRecord`.
         """
 
+        self._require_actor(actor_id)
+        self._require_entity(org_id, payload.business_entity_id)
         decided_at = payload.decided_at or datetime.now(timezone.utc)
 
         decision = DecisionRecord(
@@ -163,8 +169,9 @@ class DecisionService:
         Raises:
             HTTPException: ``404`` if the decision does not exist for the org.
         """
+        self._require_actor(actor_id)
 
-        stmt = scope_select(select(DecisionRecord), DecisionRecord, org_id).where(
+        stmt = self._scope(select(DecisionRecord), DecisionRecord, org_id).where(
             DecisionRecord.id == decision_id
         )
         decision = self.db.execute(stmt).scalar_one_or_none()
@@ -212,7 +219,7 @@ class DecisionService:
 
         filters = filters or DecisionListFilter()
 
-        stmt = scope_select(select(DecisionRecord), DecisionRecord, org_id)
+        stmt = self._scope(select(DecisionRecord), DecisionRecord, org_id)
         if filters.business_entity_id is not None:
             stmt = stmt.where(
                 DecisionRecord.business_entity_id == filters.business_entity_id

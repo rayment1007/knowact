@@ -81,7 +81,7 @@ def list_source_items(
     review_pending: bool = False,
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[SourceItemResponse]:
     """Return the organization's inbox, newest first (Requirement 3.2).
 
@@ -91,7 +91,7 @@ def list_source_items(
     """
 
     filters = InboxFilter(status=status, business_category=category, review_pending=review_pending)
-    items = IngestionService(db).list_inbox(organization_id, filters, review_user_id=_user.id)
+    items = IngestionService(db, owner_id=user.id).list_inbox(organization_id, filters, review_user_id=user.id)
     return [SourceItemResponse.model_validate(item) for item in items]
 
 
@@ -114,7 +114,7 @@ def create_source_item(
     (Requirement 3.5).
     """
 
-    item = IngestionService(db).ingest(organization_id, user.id, payload)
+    item = IngestionService(db, owner_id=user.id).ingest(organization_id, user.id, payload)
     return SourceItemResponse.model_validate(item)
 
 
@@ -123,7 +123,7 @@ def get_source_item(
     item_id: UUID,
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> SourceItemDetailResponse:
     """Return a single item plus its current classification (Requirement 3.3).
 
@@ -131,7 +131,7 @@ def get_source_item(
     A non-existent or cross-tenant id yields ``404`` (Requirement 2.3).
     """
 
-    service = IngestionService(db)
+    service = IngestionService(db, owner_id=user.id)
     item = service.get(organization_id, item_id)
     classification = service.get_current_classification(item.id)
     return SourceItemDetailResponse(
@@ -156,7 +156,7 @@ def dismiss_source_item(
     A non-existent or cross-tenant id yields ``404`` (Requirement 2.3).
     """
 
-    item = IngestionService(db).dismiss(organization_id, item_id, user.id)
+    item = IngestionService(db, owner_id=user.id).dismiss(organization_id, item_id, user.id)
     return SourceItemResponse.model_validate(item)
 
 
@@ -181,7 +181,7 @@ def delete_source_item(
     """
 
     from app.dependencies import not_found
-    service = IngestionService(db)
+    service = IngestionService(db, owner_id=user.id)
     if service.get(organization_id, item_id).created_by != user.id:
         raise not_found("Source not found.")
     service.delete(organization_id, item_id, user.id)
@@ -203,7 +203,7 @@ def classify_source_item(
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
     settings: Settings = Depends(get_settings),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> ClassificationResultResponse:
     """Run AI classification, persisting a ``SUGGESTED`` result (Requirement 4.1).
 
@@ -226,7 +226,7 @@ def classify_source_item(
             lambda p: p.classify_source_item(content, title),
         )
 
-    result = ClassificationService(db).classify(
+    result = ClassificationService(db, owner_id=user.id).classify(
         organization_id, item_id, classifier=classifier
     )
     return ClassificationResultResponse.model_validate(result)
@@ -252,7 +252,7 @@ def confirm_classification(
     cross-tenant id, yields ``404`` (Requirements 2.3, 5.4).
     """
 
-    result = ClassificationService(db).confirm(
+    result = ClassificationService(db, owner_id=user.id).confirm(
         organization_id, item_id, user.id, override=override
     )
     return ClassificationResultResponse.model_validate(result)
@@ -276,7 +276,7 @@ def reject_classification(
     (Requirement 2.3).
     """
 
-    result = ClassificationService(db).reject(organization_id, item_id, user.id)
+    result = ClassificationService(db, owner_id=user.id).reject(organization_id, item_id, user.id)
     return ClassificationResultResponse.model_validate(result)
 
 
@@ -296,7 +296,7 @@ def extract_knowledge(
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
     settings: Settings = Depends(get_settings),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> KnowledgeItemResponse:
     """Extract a ``SUGGESTED`` knowledge item from a source item (Requirement 6).
 
@@ -326,7 +326,7 @@ def extract_knowledge(
             lambda p: p.extract_knowledge(content, context),
         )
 
-    knowledge = KnowledgeService(db).extract(
+    knowledge = KnowledgeService(db, owner_id=user.id).extract(
         organization_id, item_id, extractor=extractor, acknowledged=acknowledged
     )
     return KnowledgeItemResponse.model_validate(knowledge)

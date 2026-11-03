@@ -43,7 +43,7 @@ def list_decisions(
     business_entity_id: UUID | None = None,
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[DecisionRecordResponse]:
     """Return the organization's decision records, newest first (Requirement 9.3).
 
@@ -54,7 +54,7 @@ def list_decisions(
     """
 
     filters = DecisionListFilter(business_entity_id=business_entity_id)
-    decisions = DecisionService(db).list(organization_id, filters)
+    decisions = DecisionService(db, owner_id=user.id).list(organization_id, filters)
     return [DecisionRecordResponse.model_validate(d) for d in decisions]
 
 
@@ -63,7 +63,7 @@ def get_decision(
     decision_id: UUID,
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> DecisionRecordResponse:
     """Return one decision record for a direct Decision Memory deep link.
 
@@ -71,7 +71,7 @@ def get_decision(
     ``404``.
     """
 
-    decision = DecisionService(db).get(organization_id, decision_id)
+    decision = DecisionService(db, owner_id=user.id).get(organization_id, decision_id)
     return DecisionRecordResponse.model_validate(decision)
 
 
@@ -95,7 +95,7 @@ def create_decision(
     yields ``422`` before this handler runs, so no partial decision is written.
     """
 
-    decision = DecisionService(db).create(organization_id, user.id, payload)
+    decision = DecisionService(db, owner_id=user.id).create(organization_id, user.id, payload)
     return DecisionRecordResponse.model_validate(decision)
 
 
@@ -116,5 +116,5 @@ def delete_decision(
     non-existent or cross-tenant id yields ``404``.
     """
 
-    DecisionService(db).delete(organization_id, decision_id, user.id)
+    DecisionService(db, owner_id=user.id).delete(organization_id, decision_id, user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

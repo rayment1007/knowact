@@ -91,12 +91,14 @@ def _connect_calendar(client: TestClient) -> str:
 def _make_action(
     db_session: Any,
     org_id: Any,
+    owner_id: Any,
     *,
     status: ActionStatus = ActionStatus.OPEN,
     title: str = "Follow up with client",
 ) -> ActionItem:
     action = ActionItem(
         organization_id=org_id,
+        workspace_owner_id=owner_id,
         title=title,
         description="Details",
         status=status,
@@ -158,7 +160,7 @@ def test_add_confirmed_action_creates_link_and_audit(
 ) -> None:
     _login(cwi_client, seeded_user)
     connection_id = _connect_calendar(cwi_client)
-    action = _make_action(db_session, seeded_user["organization"].id)
+    action = _make_action(db_session, seeded_user["organization"].id, seeded_user["user"].id)
 
     payload = {"connection_id": connection_id, "google_calendar_id": "primary", "all_day": True, "all_day_date": "2026-10-09"}
     resp = cwi_client.post(
@@ -189,7 +191,7 @@ def test_add_confirmed_action_is_idempotent(
 ) -> None:
     _login(cwi_client, seeded_user)
     connection_id = _connect_calendar(cwi_client)
-    action = _make_action(db_session, seeded_user["organization"].id)
+    action = _make_action(db_session, seeded_user["organization"].id, seeded_user["user"].id)
 
     payload = {"connection_id": connection_id, "google_calendar_id": "primary", "all_day": True, "all_day_date": "2026-10-09"}
     first = cwi_client.post(
@@ -224,7 +226,7 @@ def test_add_non_confirmed_action_rejected(
     connection_id = _connect_calendar(cwi_client)
     # A withdrawn (CANCELLED) action is treated as not confirmed (Req 28.2).
     action = _make_action(
-        db_session, seeded_user["organization"].id, status=ActionStatus.CANCELLED
+        db_session, seeded_user["organization"].id, seeded_user["user"].id, status=ActionStatus.CANCELLED
     )
 
     payload = {"connection_id": connection_id, "google_calendar_id": "primary", "all_day": True, "all_day_date": "2026-10-09"}
@@ -248,7 +250,7 @@ def test_update_and_cancel_event(
 ) -> None:
     _login(cwi_client, seeded_user)
     connection_id = _connect_calendar(cwi_client)
-    action = _make_action(db_session, seeded_user["organization"].id)
+    action = _make_action(db_session, seeded_user["organization"].id, seeded_user["user"].id)
 
     payload = {"connection_id": connection_id, "google_calendar_id": "primary", "all_day": True, "all_day_date": "2026-10-09"}
     link_id = cwi_client.post(
@@ -283,7 +285,7 @@ def test_retry_after_failed_create(
 ) -> None:
     _login(cwi_client, seeded_user)
     connection_id = _connect_calendar(cwi_client)
-    action = _make_action(db_session, seeded_user["organization"].id)
+    action = _make_action(db_session, seeded_user["organization"].id, seeded_user["user"].id)
 
     # First create fails at the transport; the link is persisted as FAILED.
     fake_calendar.fail_next_create = True
@@ -362,7 +364,7 @@ def test_cross_org_link_returns_404(
 ) -> None:
     _login(cwi_client, seeded_user)
     connection_id = _connect_calendar(cwi_client)
-    action = _make_action(db_session, seeded_user["organization"].id)
+    action = _make_action(db_session, seeded_user["organization"].id, seeded_user["user"].id)
     payload = {"connection_id": connection_id, "google_calendar_id": "primary", "all_day": True, "all_day_date": "2026-10-09"}
     link_id = cwi_client.post(
         f"/api/actions/{action.id}/add-to-calendar", json=payload

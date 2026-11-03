@@ -16,6 +16,7 @@ Covers task 12.1's contract:
 
 from __future__ import annotations
 
+from tests.ownership_fixtures import only_user_id
 from datetime import date
 
 import pytest
@@ -67,7 +68,7 @@ def _make_entity(
     name: str = "Project Orion",
     entity_type: BusinessEntityType = BusinessEntityType.PROJECT,
 ) -> BusinessEntity:
-    entity = BusinessEntity(
+    entity = BusinessEntity(workspace_owner_id=only_user_id(db, org.id),
         organization_id=org.id,
         entity_type=entity_type,
         name=name,
@@ -86,7 +87,7 @@ def _make_knowledge(
     entity_id=None,
     evidence_text: str = "Supporting evidence text.",
 ) -> KnowledgeItem:
-    item = KnowledgeItem(
+    item = KnowledgeItem(workspace_owner_id=only_user_id(db, org.id),
         organization_id=org.id,
         business_entity_id=entity_id,
         summary=summary,
@@ -107,7 +108,7 @@ def _make_action(
     status: ActionStatus = ActionStatus.OPEN,
     entity_id=None,
 ) -> ActionItem:
-    action = ActionItem(
+    action = ActionItem(workspace_owner_id=only_user_id(db, org.id),
         organization_id=org.id,
         business_entity_id=entity_id,
         title=title,
@@ -153,7 +154,7 @@ def test_daily_brief_persists_daily_brief_with_content(db_session: Session) -> N
     _make_action(db_session, org, "Send the updated proposal")
     _make_decision(db_session, org, user, "Adopt the new vendor")
 
-    service = BriefService(db_session)
+    service = BriefService(db_session, owner_id=user.id)
     brief = service.daily_brief(org.id, user.id)
 
     assert brief.id is not None
@@ -189,7 +190,7 @@ def test_daily_brief_resolves_readable_evidence_text(db_session: Session) -> Non
         evidence_text="Client confirmed the roadmap milestone on the call.",
     )
 
-    service = BriefService(db_session)
+    service = BriefService(db_session, owner_id=user.id)
     brief = service.daily_brief(org.id, user.id)
 
     priorities = brief.content["priorities"]
@@ -227,7 +228,7 @@ def test_daily_brief_hides_unresolvable_id_evidence(db_session: Session) -> None
             priorities=[BriefLine(text="Something", evidence_ref=stray_id)],
         )
 
-    service = BriefService(db_session)
+    service = BriefService(db_session, owner_id=user.id)
     brief = service.daily_brief(org.id, user.id, generator=generator)
 
     line = brief.content["priorities"][0]
@@ -249,7 +250,7 @@ def test_daily_brief_excludes_suggested_knowledge(db_session: Session) -> None:
         db_session, org, "Rejected item", status=SuggestionStatus.REJECTED
     )
 
-    service = BriefService(db_session)
+    service = BriefService(db_session, owner_id=user.id)
     brief = service.daily_brief(org.id, user.id)
 
     priority_refs = {p["evidence_ref"] for p in brief.content["priorities"]}
@@ -266,7 +267,7 @@ def test_daily_brief_excludes_closed_actions(db_session: Session) -> None:
     _make_action(db_session, org, "Finished task", status=ActionStatus.DONE)
     _make_action(db_session, org, "Cancelled task", status=ActionStatus.CANCELLED)
 
-    service = BriefService(db_session)
+    service = BriefService(db_session, owner_id=user.id)
     brief = service.daily_brief(org.id, user.id)
 
     titles = {a["title"] for a in brief.content["recommended_actions"]}
@@ -293,7 +294,7 @@ def test_entity_brief_persists_entity_scoped_brief(db_session: Session) -> None:
     _make_action(db_session, org, "Entity action", entity_id=entity.id)
     _make_action(db_session, org, "Other entity action", entity_id=other_entity.id)
 
-    service = BriefService(db_session)
+    service = BriefService(db_session, owner_id=user.id)
     brief = service.entity_brief(org.id, entity.id, user.id)
 
     assert brief.scope == "ENTITY"
@@ -325,7 +326,7 @@ def test_entity_brief_excludes_suggested_knowledge(db_session: Session) -> None:
         status=SuggestionStatus.SUGGESTED,
     )
 
-    service = BriefService(db_session)
+    service = BriefService(db_session, owner_id=user.id)
     brief = service.entity_brief(org.id, entity.id, user.id)
 
     refs = {b["evidence_ref"] for b in brief.content["recent_knowledge"]}
@@ -339,7 +340,7 @@ def test_entity_brief_cross_org_is_404(db_session: Session) -> None:
     org_b, _user_b = _make_org_and_user(db_session, "Org G", "g@example.com")
     entity_b = _make_entity(db_session, org_b)
 
-    service = BriefService(db_session)
+    service = BriefService(db_session, owner_id=user_a.id)
     with pytest.raises(HTTPException) as exc:
         service.entity_brief(org_a.id, entity_b.id, user_a.id)
     assert exc.value.status_code == 404
@@ -351,7 +352,7 @@ def test_daily_brief_content_is_json_serializable(db_session: Session) -> None:
     org, user = _make_org_and_user(db_session, "Org H", "h@example.com")
     _make_knowledge(db_session, org, "A confirmed fact")
 
-    service = BriefService(db_session)
+    service = BriefService(db_session, owner_id=user.id)
     brief = service.daily_brief(org.id, user.id)
 
     db_session.expire(brief)

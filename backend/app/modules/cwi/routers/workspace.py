@@ -13,6 +13,7 @@ from sqlalchemy import String, cast, delete, func, literal, or_, select, union_a
 from sqlalchemy.orm import Session
 
 from app.core.models import ActionItem, AuditLog, ClassificationResult, KnowledgeItem, SourceItem, SourceType, User
+from app.core.ownership import owner_predicate
 from app.database import get_db
 from app.dependencies import get_current_user, not_found
 from app.modules.cwi.models import (
@@ -118,8 +119,8 @@ def summary(db: Session = Depends(get_db), user: User = Depends(get_current_user
         "documents_pending": count(DocumentAsset, DocumentAsset.uploaded_by == user.id, DocumentAsset.source_deleted.is_(False), DocumentAsset.processing_status.in_(["UPLOADED", "PARSING", "CHUNKING", "EMBEDDING"])),
         "documents_failed": count(DocumentAsset, DocumentAsset.uploaded_by == user.id, DocumentAsset.source_deleted.is_(False), DocumentAsset.processing_status == "FAILED"),
         "notes": count(SourceItem, SourceItem.created_by == user.id, SourceItem.source_type.notin_([SourceType.EMAIL, SourceType.DOCUMENT])),
-        "open_actions": count(ActionItem, ActionItem.status.in_(["OPEN", "IN_PROGRESS"])),
-        "knowledge": count(KnowledgeItem, KnowledgeItem.status == "CONFIRMED"),
+        "open_actions": count(ActionItem, owner_predicate(ActionItem, user.id), ActionItem.status.in_(["OPEN", "IN_PROGRESS"])),
+        "knowledge": count(KnowledgeItem, owner_predicate(KnowledgeItem, user.id), KnowledgeItem.status == "CONFIRMED"),
         "knowledge_reviews": review_counts["knowledge_reviews"],
         "action_reviews": review_counts["actions_reviews"],
         "draft_reviews": count(EmailDraft, EmailDraft.user_id == user.id, EmailDraft.status == "AI_SUGGESTED"),
@@ -163,8 +164,8 @@ def activity(
     for row in rows[:limit]:
         model, title_field, path_root = _ACTIVITY_TARGETS[row.target_type]
         target_query = select(model).where(model.id == row.target_id, model.organization_id == user.organization_id)
-        if model is SourceItem:
-            target_query = target_query.where(SourceItem.created_by == user.id)
+        if model in (SourceItem, KnowledgeItem, ActionItem):
+            target_query = target_query.where(owner_predicate(model, user.id))
         elif model is DocumentAsset:
             target_query = target_query.where(DocumentAsset.uploaded_by == user.id, DocumentAsset.source_deleted.is_(False))
         elif model is CalendarSource:
@@ -229,10 +230,10 @@ def search(
     )
     queries["knowledge"] = fields(KnowledgeItem, "knowledge", KnowledgeItem.summary, KnowledgeItem.evidence_text,
         KnowledgeItem.status, KnowledgeItem.updated_at, "/knowledge/").where(
-        matches(KnowledgeItem.summary, KnowledgeItem.evidence_text, KnowledgeItem.key_points))
+        owner_predicate(KnowledgeItem, user.id), matches(KnowledgeItem.summary, KnowledgeItem.evidence_text, KnowledgeItem.key_points))
     queries["action"] = fields(ActionItem, "action", ActionItem.title, ActionItem.description,
         ActionItem.status, ActionItem.created_at, "/actions/").where(
-        matches(ActionItem.title, ActionItem.description, ActionItem.evidence_text))
+        owner_predicate(ActionItem, user.id), matches(ActionItem.title, ActionItem.description, ActionItem.evidence_text))
     queries["draft"] = fields(EmailDraft, "draft", EmailDraft.subject, EmailDraft.body_text,
         EmailDraft.status, EmailDraft.created_at, "/email-drafts/").where(
         EmailDraft.user_id == user.id, matches(EmailDraft.subject, EmailDraft.body_text, EmailDraft.to_recipients_json))

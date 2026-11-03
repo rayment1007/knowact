@@ -1,9 +1,8 @@
 """Same-organization user isolation for personal CWI resources.
 
-Core Source, Knowledge, Action, and Decision records intentionally retain their
-organization-shared semantics.  Gmail-derived records, email drafts, calendar
-links, privacy controls, and Copilot email evidence are personal because they
-are anchored to a user's own external connection.
+Core and connected-workspace records are personal. Resources must remain
+isolated even when two users share an organization; external connections do
+not grant access to another user's knowledge, actions, or project context.
 """
 
 from __future__ import annotations
@@ -244,6 +243,7 @@ def _seed_calendar_link(
 ) -> CalendarEventLink:
     action = ActionItem(
         organization_id=org_id,
+        workspace_owner_id=user_id,
         title="Owner calendar action",
         description="Private calendar details",
         status="OPEN",

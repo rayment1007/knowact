@@ -139,11 +139,11 @@ def test_list_is_scoped_to_organization(db_session: Session) -> None:
     service.record(org_a.id, user_a.id, "CREATE_ACTION", "ActionItem", user_a.id)
     service.record(org_b.id, user_b.id, "CREATE_ACTION", "ActionItem", user_b.id)
 
-    a_entries = service.list(org_a.id)
+    a_entries = service.list(org_a.id, owner_id=user_a.id)
     assert len(a_entries) == 1
     assert all(e.organization_id == org_a.id for e in a_entries)
 
-    b_entries = service.list(org_b.id)
+    b_entries = service.list(org_b.id, owner_id=user_b.id)
     assert len(b_entries) == 1
     assert all(e.organization_id == org_b.id for e in b_entries)
 
@@ -158,7 +158,7 @@ def test_list_orders_newest_first(db_session: Session) -> None:
         service.record(org.id, user.id, "C", "T", user.id),
     ]
 
-    entries = service.list(org.id)
+    entries = service.list(org.id, owner_id=user.id)
     # All entries are returned, ...
     assert len(entries) == len(created)
     assert {e.id for e in entries} == {e.id for e in created}
@@ -174,11 +174,11 @@ def test_list_filters_by_action_and_target_type(db_session: Session) -> None:
     service.record(org.id, user.id, "CONFIRM_KNOWLEDGE", "KnowledgeItem", user.id)
     service.record(org.id, user.id, "CREATE_ACTION", "ActionItem", user.id)
 
-    by_action = service.list(org.id, AuditFilter(action_type="CREATE_ACTION"))
+    by_action = service.list(org.id, AuditFilter(action_type="CREATE_ACTION"), owner_id=user.id)
     assert len(by_action) == 1
     assert by_action[0].action_type == "CREATE_ACTION"
 
-    by_target = service.list(org.id, AuditFilter(target_type="KnowledgeItem"))
+    by_target = service.list(org.id, AuditFilter(target_type="KnowledgeItem"), owner_id=user.id)
     assert len(by_target) == 1
     assert by_target[0].target_type == "KnowledgeItem"
 

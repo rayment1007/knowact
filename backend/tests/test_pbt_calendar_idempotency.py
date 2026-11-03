@@ -93,6 +93,7 @@ def _seed_confirmed_action(
     db.flush()
     action = ActionItem(
         organization_id=org.id,
+        workspace_owner_id=user.id,
         title=f"Task {suffix}",
         description="Do the thing",
         status=ActionStatus.OPEN,

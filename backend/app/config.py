@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     #   DEVELOPMENT -> LLM failures may fall back to the deterministic mock.
     #   PRODUCTION  -> LLM failures surface as a retriable 503 (no silent fallback).
     mode: Literal["DEVELOPMENT", "PRODUCTION"] = "DEVELOPMENT"
+    # Phase 2 storage/review foundation is intentionally not a production UI.
+    # Even when enabled, its development router remains unavailable in PRODUCTION.
+    fact_memory_enabled: bool = False
 
     # --- Database ------------------------------------------------------------
     # SQLAlchemy / psycopg connection URL. The real password is supplied only

@@ -133,7 +133,7 @@ def test_confirm_single_axis_override_leaves_other_axes_intact(
 
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
     service.classify(
         org.id,
         item.id,
@@ -164,7 +164,7 @@ def test_confirm_without_override_keeps_all_ai_values(db_session: Session) -> No
 
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
     service.classify(
         org.id,
         item.id,
@@ -190,7 +190,7 @@ def test_confirm_empty_override_object_keeps_all_ai_values(
 
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
     service.classify(
         org.id,
         item.id,
@@ -221,7 +221,7 @@ def test_confirm_override_all_axes_records_only_changed_axes_in_audit(
 
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
     service.classify(
         org.id,
         item.id,
@@ -264,7 +264,7 @@ def test_repeated_reject_reclassify_cycles_keep_single_active(
 
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
 
     cycles = 4
     for _ in range(cycles):
@@ -295,7 +295,7 @@ def test_classify_repeatedly_never_yields_two_active(db_session: Session) -> Non
 
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
 
     categories = [
         BusinessCategory.TASK,
@@ -329,7 +329,7 @@ def test_confirm_then_reclassify_retires_confirmed_result(
 
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
 
     service.classify(org.id, item.id, classifier=_fixed_classifier())
     confirmed = service.confirm(org.id, item.id, actor_id=user.id)

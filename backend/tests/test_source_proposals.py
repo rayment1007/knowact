@@ -177,7 +177,7 @@ def test_calendar_update_cannot_approve_old_snapshot(client, db_session, seeded_
 def test_action_inherits_original_source_from_linked_knowledge(client, db_session, seeded_user):
     _login(client, seeded_user); user = seeded_user["user"]; row = file_source(db_session, user)
     accepted = approve(client, prepare(client, "file", row.id)).json()
-    action = ActionItem(organization_id=user.organization_id, knowledge_item_id=UUID(accepted["result_id"]), title="Follow up")
+    action = ActionItem(organization_id=user.organization_id, workspace_owner_id=user.id, knowledge_item_id=UUID(accepted["result_id"]), title="Follow up")
     db_session.add(action); db_session.flush()
     context = client.get(f"/api/workspace/actions/{action.id}/context").json()
     assert context["origins"][0]["path"] == f"/workspace/sources?item=file:{row.id}"

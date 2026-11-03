@@ -37,6 +37,7 @@ def register_routers(app: FastAPI) -> None:
         briefs,
         business_entities,
         decisions,
+        fact_memory,
         knowledge,
         source_items,
     )
@@ -52,6 +53,7 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(auth.router, prefix="/api")
     app.include_router(source_items.router, prefix="/api")
     app.include_router(knowledge.router, prefix="/api")
+    app.include_router(fact_memory.router, prefix="/api")
     app.include_router(actions.router, prefix="/api")
     app.include_router(decisions.router, prefix="/api")
     app.include_router(business_entities.router, prefix="/api")

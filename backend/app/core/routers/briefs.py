@@ -81,7 +81,7 @@ def get_daily_brief(
             lambda p: p.generate_daily_brief(context),
         )
 
-    brief = BriefService(db).daily_brief(
+    brief = BriefService(db, owner_id=user.id).daily_brief(
         organization_id, user.id, generator=generator
     )
     return BriefResponse.model_validate(brief)

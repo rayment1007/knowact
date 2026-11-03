@@ -19,6 +19,7 @@ Exercises the real FastAPI app against an ephemeral SQLite database (see
 
 from __future__ import annotations
 
+from tests.ownership_fixtures import only_user_id
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -35,7 +36,7 @@ def _login(client: TestClient, email: str, password: str) -> Any:
 
 
 def _make_entity(db: Session, org_id: Any, name: str) -> core_models.BusinessEntity:
-    entity = core_models.BusinessEntity(
+    entity = core_models.BusinessEntity(workspace_owner_id=only_user_id(db, org_id),
         organization_id=org_id,
         entity_type=core_models.BusinessEntityType.PROJECT,
         name=name,
@@ -53,7 +54,7 @@ def _make_knowledge(
     business_entity_id: Any = None,
     evidence_text: str = "confirmed evidence",
 ) -> core_models.KnowledgeItem:
-    knowledge = core_models.KnowledgeItem(
+    knowledge = core_models.KnowledgeItem(workspace_owner_id=only_user_id(db, org_id),
         organization_id=org_id,
         business_entity_id=business_entity_id,
         summary="A recommendation",

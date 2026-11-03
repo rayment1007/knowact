@@ -19,6 +19,7 @@ Exercises the real FastAPI app against an ephemeral SQLite database (see
 
 from __future__ import annotations
 
+from tests.ownership_fixtures import only_user_id
 from typing import Any
 from uuid import UUID
 
@@ -199,12 +200,12 @@ def test_list_knowledge_filters_by_entity_and_status(
     org_id = seeded_user["organization"].id
 
     # Two entities and one knowledge item linked to each.
-    entity_a = core_models.BusinessEntity(
+    entity_a = core_models.BusinessEntity(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id,
         entity_type=core_models.BusinessEntityType.PROJECT,
         name="Entity A",
     )
-    entity_b = core_models.BusinessEntity(
+    entity_b = core_models.BusinessEntity(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id,
         entity_type=core_models.BusinessEntityType.PROJECT,
         name="Entity B",
@@ -212,7 +213,7 @@ def test_list_knowledge_filters_by_entity_and_status(
     db_session.add_all([entity_a, entity_b])
     db_session.flush()
 
-    k_a = core_models.KnowledgeItem(
+    k_a = core_models.KnowledgeItem(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id,
         business_entity_id=entity_a.id,
         summary="Knowledge A",
@@ -220,7 +221,7 @@ def test_list_knowledge_filters_by_entity_and_status(
         knowledge_type="FACT",
         status=core_models.SuggestionStatus.CONFIRMED,
     )
-    k_b = core_models.KnowledgeItem(
+    k_b = core_models.KnowledgeItem(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id,
         business_entity_id=entity_b.id,
         summary="Knowledge B",
@@ -253,7 +254,7 @@ def test_detail_includes_linked_actions_and_decisions(
     _login(client, seeded_user["email"], seeded_user["password"])
     org_id = seeded_user["organization"].id
 
-    entity = core_models.BusinessEntity(
+    entity = core_models.BusinessEntity(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id,
         entity_type=core_models.BusinessEntityType.PROJECT,
         name="Orion",
@@ -261,7 +262,7 @@ def test_detail_includes_linked_actions_and_decisions(
     db_session.add(entity)
     db_session.flush()
 
-    knowledge = core_models.KnowledgeItem(
+    knowledge = core_models.KnowledgeItem(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id,
         business_entity_id=entity.id,
         summary="Orion knowledge",
@@ -273,14 +274,14 @@ def test_detail_includes_linked_actions_and_decisions(
     db_session.flush()
 
     # Action linked directly via knowledge_item_id.
-    action_direct = core_models.ActionItem(
+    action_direct = core_models.ActionItem(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id,
         knowledge_item_id=knowledge.id,
         title="Follow up on Orion",
         status=core_models.ActionStatus.OPEN,
     )
     # Action linked via shared business entity.
-    action_entity = core_models.ActionItem(
+    action_entity = core_models.ActionItem(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id,
         business_entity_id=entity.id,
         title="Review Orion budget",

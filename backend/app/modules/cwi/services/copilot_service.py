@@ -64,8 +64,9 @@ from app.core.services.ai_provider import (
     CopilotQueryContext,
 )
 from app.core.services.action_service import ActionService
+from app.core.ownership import scope_owned_select, owner_predicate
 from app.core.services.audit_service import AuditService
-from app.dependencies import call_with_fallback, scope_select
+from app.dependencies import call_with_fallback, not_found, scope_select
 from app.modules.cwi.models import (
     CalendarSource,
     CopilotAnswerLog,
@@ -236,7 +237,6 @@ class CopilotService:
         self.ai_provider = ai_provider
         self.settings = settings or get_settings()
         self.audit = audit or AuditService(db)
-        self.actions = ActionService(db, self.audit)
         self.retrieval = RetrievalService(db, embedding_provider)
 
     # -- Intent -------------------------------------------------------------
@@ -267,10 +267,10 @@ class CopilotService:
         if tier is not CopilotToolTier.ASK:  # pragma: no cover - defensive
             raise RuntimeError(f"Tool {name!r} is not an approved ASK tool.")
 
-    def _search_confirmed_knowledge(self, org_id: UUID) -> list[_Evidence]:
+    def _search_confirmed_knowledge(self, org_id: UUID, user_id: UUID) -> list[_Evidence]:
         self._assert_ask_tool("search_confirmed_knowledge")
         stmt = (
-            scope_select(select(KnowledgeItem), KnowledgeItem, org_id)
+            scope_owned_select(select(KnowledgeItem), KnowledgeItem, org_id, user_id)
             .where(KnowledgeItem.status == SuggestionStatus.CONFIRMED)
             .order_by(KnowledgeItem.created_at.desc(), KnowledgeItem.id.desc())
             .limit(_MAX_PER_CATEGORY)
@@ -345,10 +345,10 @@ class CopilotService:
             for chunk in chunks
         ]
 
-    def _list_open_actions(self, org_id: UUID) -> list[_Evidence]:
+    def _list_open_actions(self, org_id: UUID, user_id: UUID) -> list[_Evidence]:
         self._assert_ask_tool("list_open_actions")
         stmt = (
-            scope_select(select(ActionItem), ActionItem, org_id)
+            scope_owned_select(select(ActionItem), ActionItem, org_id, user_id)
             .where(ActionItem.status.in_([ActionStatus.OPEN, ActionStatus.IN_PROGRESS]))
             .order_by(ActionItem.due_date.asc().nulls_last(), ActionItem.created_at.desc(), ActionItem.id.desc())
             .limit(_MAX_PER_CATEGORY)
@@ -367,10 +367,10 @@ class CopilotService:
             for row in rows
         ]
 
-    def _list_recent_decisions(self, org_id: UUID) -> list[_Evidence]:
+    def _list_recent_decisions(self, org_id: UUID, user_id: UUID) -> list[_Evidence]:
         self._assert_ask_tool("list_recent_decisions")
         stmt = (
-            scope_select(select(DecisionRecord), DecisionRecord, org_id)
+            scope_owned_select(select(DecisionRecord), DecisionRecord, org_id, user_id)
             .order_by(DecisionRecord.decided_at.desc(), DecisionRecord.id.desc())
             .limit(_MAX_PER_CATEGORY)
         )
@@ -388,7 +388,7 @@ class CopilotService:
         ]
 
     def _get_client_context(
-        self, org_id: UUID, business_entity_id: UUID | None
+        self, org_id: UUID, user_id: UUID, business_entity_id: UUID | None
     ) -> list[_Evidence]:
         """Retrieve client-facing context from CLIENT business entities.
 
@@ -399,7 +399,7 @@ class CopilotService:
         """
 
         self._assert_ask_tool("get_client_context")
-        stmt = scope_select(select(BusinessEntity), BusinessEntity, org_id).where(
+        stmt = scope_owned_select(select(BusinessEntity), BusinessEntity, org_id, user_id).where(
             BusinessEntity.entity_type == BusinessEntityType.CLIENT
         )
         if business_entity_id is not None:
@@ -480,7 +480,7 @@ class CopilotService:
             return None
         today = now.date()
         base = select(ActionItem).where(ActionItem.organization_id == org_id,
-            ActionItem.status.in_([ActionStatus.OPEN, ActionStatus.IN_PROGRESS]))
+            owner_predicate(ActionItem, user_id), ActionItem.status.in_([ActionStatus.OPEN, ActionStatus.IN_PROGRESS]))
         lines = [f"As of {today.strftime('%d %b %Y')} (UTC{now.strftime('%z')[:3]}:{now.strftime('%z')[3:]}), based on saved workspace data:"]
         evidence = []
         for label, condition in [("Overdue tasks", ActionItem.due_date < today), ("Due today", ActionItem.due_date == today)]:
@@ -538,10 +538,10 @@ class CopilotService:
         """
 
         collected: list[_Evidence] = []
-        collected += self._search_confirmed_knowledge(org_id)
-        collected += self._list_open_actions(org_id)
-        collected += self._list_recent_decisions(org_id)
-        collected += self._get_client_context(org_id, business_entity_id)
+        collected += self._search_confirmed_knowledge(org_id, user_id)
+        collected += self._list_open_actions(org_id, user_id)
+        collected += self._list_recent_decisions(org_id, user_id)
+        collected += self._get_client_context(org_id, user_id, business_entity_id)
         collected += self._get_upcoming_calendar_events(org_id, user_id)
         collected += self._search_email_sources(org_id, user_id)
         collected += self._search_document_chunks(
@@ -577,6 +577,10 @@ class CopilotService:
 
         intent = self._determine_intent(req.question, getattr(req, "intent", None))
         business_entity_id = getattr(req, "business_entity_id", None)
+        if business_entity_id is not None and self.db.scalar(scope_owned_select(
+            select(BusinessEntity), BusinessEntity, org_id, user_id
+        ).where(BusinessEntity.id == business_entity_id)) is None:
+            raise not_found("Business entity not found.")
 
         self.request_now = datetime.now(timezone(timedelta(minutes=getattr(req, "utc_offset_minutes", 0))))
         if intent == CopilotIntent.ASK:
@@ -768,7 +772,7 @@ class CopilotService:
         dynamic: list[str] = []
 
         open_count = self.db.execute(
-            scope_select(select(ActionItem), ActionItem, org_id).where(
+            scope_owned_select(select(ActionItem), ActionItem, org_id, user_id).where(
                 ActionItem.status == ActionStatus.OPEN
             )
         ).scalars().all()
@@ -778,7 +782,7 @@ class CopilotService:
             )
 
         recent_decisions = self.db.execute(
-            scope_select(select(DecisionRecord), DecisionRecord, org_id)
+            scope_owned_select(select(DecisionRecord), DecisionRecord, org_id, user_id)
             .order_by(DecisionRecord.decided_at.desc())
             .limit(1)
         ).scalars().first()
@@ -788,7 +792,7 @@ class CopilotService:
             )
 
         clients = self.db.execute(
-            scope_select(select(BusinessEntity), BusinessEntity, org_id)
+            scope_owned_select(select(BusinessEntity), BusinessEntity, org_id, user_id)
             .where(BusinessEntity.entity_type == BusinessEntityType.CLIENT)
             .order_by(BusinessEntity.updated_at.desc())
             .limit(3)
@@ -830,7 +834,7 @@ class CopilotService:
                 due_date=getattr(req, "due_date", None),
                 evidence_text=getattr(req, "evidence_text", None) or req.body,
             )
-            action = self.actions.create(org_id, user_id, payload)
+            action = ActionService(self.db, self.audit, owner_id=user_id).create(org_id, user_id, payload)
             return CopilotConfirmResponse(
                 applied=True,
                 kind=kind,

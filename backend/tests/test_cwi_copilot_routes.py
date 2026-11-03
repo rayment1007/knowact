@@ -57,10 +57,11 @@ def _login(client: TestClient, seeded_user: dict[str, Any]) -> None:
 
 
 def _seed_confirmed_knowledge(
-    db_session: Any, org_id, summary: str = "Acme renewed the annual retainer."
+    db_session: Any, org_id, owner_id, summary: str = "Acme renewed the annual retainer."
 ) -> core_models.KnowledgeItem:
     item = core_models.KnowledgeItem(
         organization_id=org_id,
+        workspace_owner_id=owner_id,
         summary=summary,
         key_points=["retainer", "annual"],
         evidence_text=summary,
@@ -116,7 +117,7 @@ def test_ask_returns_grounded_answer_with_citations_in_evidence(
     cwi_client: TestClient, seeded_user: dict[str, Any], db_session: Any
 ) -> None:
     _login(cwi_client, seeded_user)
-    item = _seed_confirmed_knowledge(db_session, seeded_user["organization"].id)
+    item = _seed_confirmed_knowledge(db_session, seeded_user["organization"].id, seeded_user["user"].id)
 
     resp = cwi_client.post(
         "/api/copilot/ask", json={"question": "What's happening with Acme?"}
@@ -153,7 +154,7 @@ def test_ask_act_intent_returns_suggested_artifact_and_no_mutation(
     cwi_client: TestClient, seeded_user: dict[str, Any], db_session: Any
 ) -> None:
     _login(cwi_client, seeded_user)
-    _seed_confirmed_knowledge(db_session, seeded_user["organization"].id)
+    _seed_confirmed_knowledge(db_session, seeded_user["organization"].id, seeded_user["user"].id)
 
     resp = cwi_client.post(
         "/api/copilot/ask",
@@ -232,6 +233,7 @@ def test_suggested_questions_returns_fixed_and_dynamic(
     db_session.add(
         core_models.ActionItem(
             organization_id=seeded_user["organization"].id,
+            workspace_owner_id=seeded_user["user"].id,
             title="Call Acme back",
         )
     )
@@ -262,7 +264,7 @@ def test_ask_is_org_scoped(
     cwi_client: TestClient, seeded_user: dict[str, Any], db_session: Any
 ) -> None:
     # Org A has confirmed knowledge; a second org sees none of it.
-    _seed_confirmed_knowledge(db_session, seeded_user["organization"].id)
+    _seed_confirmed_knowledge(db_session, seeded_user["organization"].id, seeded_user["user"].id)
 
     from app.security import hash_password
 

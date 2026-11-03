@@ -17,6 +17,7 @@ Covers task 10.1's contract:
 
 from __future__ import annotations
 
+from tests.ownership_fixtures import only_user_id
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -150,7 +151,7 @@ def test_privacy_gate_refuses_and_persists_nothing(
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
     _classify(db_session, item, relevance=relevance)
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=user.id)
 
     before = _count_knowledge(db_session)
     with pytest.raises(HTTPException) as exc:
@@ -169,7 +170,7 @@ def test_sensitivity_gate_refuses_without_acknowledgment(db_session: Session) ->
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
     _classify(db_session, item, sensitivity=Sensitivity.HIGHLY_SENSITIVE)
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=user.id)
 
     before = _count_knowledge(db_session)
     with pytest.raises(HTTPException) as exc:
@@ -185,7 +186,7 @@ def test_sensitivity_gate_proceeds_with_acknowledgment(db_session: Session) -> N
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
     _classify(db_session, item, sensitivity=Sensitivity.HIGHLY_SENSITIVE)
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=user.id)
 
     knowledge = service.extract(
         org.id, item.id, extractor=_fixed_extractor(), acknowledged=True
@@ -205,7 +206,7 @@ def test_extract_persists_suggested_with_evidence(db_session: Session) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
     _classify(db_session, item)
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=user.id)
 
     knowledge = service.extract(org.id, item.id, extractor=_fixed_extractor())
 
@@ -222,7 +223,7 @@ def test_extract_falls_back_to_content_when_evidence_empty(db_session: Session) 
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user, content="Non-empty source content.")
     _classify(db_session, item)
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=user.id)
 
     knowledge = service.extract(
         org.id, item.id, extractor=_fixed_extractor(evidence_text="")
@@ -237,7 +238,7 @@ def test_extract_with_default_mock_provider(db_session: Session) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
     _classify(db_session, item)
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=user.id)
 
     knowledge = service.extract(org.id, item.id)
 
@@ -249,7 +250,7 @@ def test_extract_links_entity_from_suggestion(db_session: Session) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
     _classify(db_session, item)
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=user.id)
 
     suggestion = EntitySuggestion(
         name="Project Orion", entity_type=BusinessEntityType.PROJECT, confidence=0.9
@@ -277,7 +278,7 @@ def test_extract_without_confirmed_classification_is_409(db_session: Session) ->
     item = _make_item(db_session, org, user)
     # Only a SUGGESTED classification exists — not yet confirmed.
     _classify(db_session, item, status=SuggestionStatus.SUGGESTED)
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=user.id)
 
     with pytest.raises(HTTPException) as exc:
         service.extract(org.id, item.id, extractor=_fixed_extractor())
@@ -287,7 +288,7 @@ def test_extract_without_confirmed_classification_is_409(db_session: Session) ->
 def test_extract_no_classification_at_all_is_409(db_session: Session) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=user.id)
 
     with pytest.raises(HTTPException) as exc:
         service.extract(org.id, item.id, extractor=_fixed_extractor())
@@ -304,7 +305,7 @@ def test_extract_cross_org_is_404(db_session: Session) -> None:
     org_b, _user_b = _make_org_and_user(db_session, "Org B", "b@example.com")
     item = _make_item(db_session, org_a, user_a)
     _classify(db_session, item)
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=user_a.id)
 
     with pytest.raises(HTTPException) as exc:
         service.extract(org_b.id, item.id, extractor=_fixed_extractor())
@@ -318,7 +319,7 @@ def test_extract_cross_org_is_404(db_session: Session) -> None:
 
 def test_link_or_create_entity_creates_when_no_match(db_session: Session) -> None:
     org, _user = _make_org_and_user(db_session, "Org A", "a@example.com")
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=_user.id)
 
     suggestion = EntitySuggestion(
         name="New Client", entity_type=BusinessEntityType.CLIENT, confidence=0.8
@@ -333,14 +334,14 @@ def test_link_or_create_entity_creates_when_no_match(db_session: Session) -> Non
 
 def test_link_or_create_entity_reuses_existing_match(db_session: Session) -> None:
     org, _user = _make_org_and_user(db_session, "Org A", "a@example.com")
-    existing = BusinessEntity(
+    existing = BusinessEntity(workspace_owner_id=only_user_id(db_session, org.id),
         organization_id=org.id,
         entity_type=BusinessEntityType.PROJECT,
         name="Project Orion",
     )
     db_session.add(existing)
     db_session.flush()
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=_user.id)
 
     suggestion = EntitySuggestion(
         name="Project Orion", entity_type=BusinessEntityType.PROJECT, confidence=0.9
@@ -358,14 +359,14 @@ def test_link_or_create_entity_type_mismatch_creates_new(db_session: Session) ->
     """Same name but a different type is a distinct entity."""
 
     org, _user = _make_org_and_user(db_session, "Org A", "a@example.com")
-    existing = BusinessEntity(
+    existing = BusinessEntity(workspace_owner_id=only_user_id(db_session, org.id),
         organization_id=org.id,
         entity_type=BusinessEntityType.PROJECT,
         name="Orion",
     )
     db_session.add(existing)
     db_session.flush()
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=_user.id)
 
     suggestion = EntitySuggestion(
         name="Orion", entity_type=BusinessEntityType.CLIENT, confidence=0.7
@@ -384,14 +385,14 @@ def test_link_or_create_entity_is_org_scoped(db_session: Session) -> None:
 
     org_a, _user_a = _make_org_and_user(db_session, "Org A", "a@example.com")
     org_b, _user_b = _make_org_and_user(db_session, "Org B", "b@example.com")
-    other = BusinessEntity(
+    other = BusinessEntity(workspace_owner_id=only_user_id(db_session, org_b.id),
         organization_id=org_b.id,
         entity_type=BusinessEntityType.PROJECT,
         name="Shared Name",
     )
     db_session.add(other)
     db_session.flush()
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=_user_a.id)
 
     suggestion = EntitySuggestion(
         name="Shared Name", entity_type=BusinessEntityType.PROJECT, confidence=0.9

@@ -122,14 +122,14 @@ def test_gmail_message_flows_through_pipeline_to_knowledge(
     assert source_item.source_type == SourceType.EMAIL
     assert source_item.status == SourceStatus.NEW
 
-    classification = ClassificationService(db_session)._active_result(
+    classification = ClassificationService(db_session, owner_id=user_id)._active_result(
         source_item.id
     )
     assert classification is not None
     assert classification.status == SuggestionStatus.SUGGESTED
 
     # 2) Confirm classification (human-in-the-loop gate).
-    confirmed_class = ClassificationService(db_session).confirm(
+    confirmed_class = ClassificationService(db_session, owner_id=user_id).confirm(
         org_id, source_item.id, user_id
     )
     assert confirmed_class.status == SuggestionStatus.CONFIRMED
@@ -137,12 +137,12 @@ def test_gmail_message_flows_through_pipeline_to_knowledge(
     assert source_item.status == SourceStatus.CLASSIFIED
 
     # 3) Extract knowledge (passes the privacy gate: work-related, PUBLIC).
-    knowledge = KnowledgeService(db_session).extract(org_id, source_item.id)
+    knowledge = KnowledgeService(db_session, owner_id=user_id).extract(org_id, source_item.id)
     assert knowledge.status == SuggestionStatus.SUGGESTED
     assert knowledge.evidence_text  # evidence present (Requirement 6.6)
 
     # 4) Confirm knowledge → CONFIRMED with an audit row.
-    confirmed_knowledge = KnowledgeService(db_session).confirm(
+    confirmed_knowledge = KnowledgeService(db_session, owner_id=user_id).confirm(
         org_id, knowledge.id, user_id
     )
     assert confirmed_knowledge.status == SuggestionStatus.CONFIRMED

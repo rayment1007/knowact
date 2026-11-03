@@ -49,6 +49,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.core.models import ActionItem, ActionStatus
+from app.core.ownership import scope_owned_select
 from app.core.services.audit_service import AuditService
 from app.dependencies import not_found, scope_select
 from app.modules.cwi.models import (
@@ -184,8 +185,8 @@ class CalendarService:
             )
         return connection
 
-    def _get_action(self, org_id: UUID, action_id: UUID) -> ActionItem:
-        stmt = scope_select(select(ActionItem), ActionItem, org_id).where(
+    def _get_action(self, org_id: UUID, user_id: UUID, action_id: UUID) -> ActionItem:
+        stmt = scope_owned_select(select(ActionItem), ActionItem, org_id, user_id).where(
             ActionItem.id == action_id
         )
         action = self.db.execute(stmt).scalar_one_or_none()
@@ -312,7 +313,11 @@ class CalendarService:
         # Remove local snapshots only after the entire provider read succeeds.
         for event_id, row in existing.items():
             if event_id not in seen and self._in_window(row, time_min, time_max):
+                self.db.refresh(row, with_for_update=True)
+                from app.core.services.fact_lifecycle import mark_fact_sources_removed
                 from app.modules.cwi.services.source_proposal_service import discard_unapproved
+                mark_fact_sources_removed(self.db, org_id=org_id, owner_id=user_id,
+                    source_kind="calendar", source_ids=[row.id])
                 discard_unapproved(self.db, org_id, "calendar", [row.id])
                 self.db.delete(row)
         connection.last_sync_at = now
@@ -478,7 +483,7 @@ class CalendarService:
         28.8).
         """
 
-        action = self._get_action(org_id, action_item_id)
+        action = self._get_action(org_id, user_id, action_item_id)
         if action.status not in _ADDABLE_ACTION_STATUSES:
             raise _conflict(
                 "Cannot add an action that is not confirmed to a calendar."
@@ -593,7 +598,7 @@ class CalendarService:
             raise _conflict("Cannot update an event that has not been created.")
 
         action = (
-            self._get_action(org_id, link.action_item_id)
+            self._get_action(org_id, user_id, link.action_item_id)
             if link.action_item_id is not None
             else None
         )
@@ -695,7 +700,11 @@ class CalendarService:
             CalendarSource.integration_connection_id == link.integration_connection_id,
             CalendarSource.google_event_id == link.google_event_id))
         if snapshot is not None:
+            self.db.refresh(snapshot, with_for_update=True)
+            from app.core.services.fact_lifecycle import mark_fact_sources_removed
             from app.modules.cwi.services.source_proposal_service import discard_unapproved
+            mark_fact_sources_removed(self.db, org_id=org_id, owner_id=user_id,
+                source_kind="calendar", source_ids=[snapshot.id])
             discard_unapproved(self.db, org_id, "calendar", [snapshot.id])
             self.db.delete(snapshot)
         link.last_synced_at = datetime.now(timezone.utc)

@@ -32,14 +32,16 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.core.models import BusinessEntity, User, KnowledgeItem, ActionItem, DecisionRecord, Brief
+from app.core.fact_models import FactIdentity
 from app.modules.cwi.models import EmailTaskSuggestion, EmailDraft
 from app.core.services.audit_service import AuditService
+from app.core.ownership import scope_owned_select
 from app.dependencies import not_found
 from app.core.schemas import (
     BriefResponse,
@@ -54,7 +56,6 @@ from app.dependencies import (
     get_ai_provider,
     get_current_organization_id,
     get_current_user,
-    scope_select,
 )
 
 router = APIRouter(prefix="/business-entities", tags=["business-entities"])
@@ -64,7 +65,7 @@ router = APIRouter(prefix="/business-entities", tags=["business-entities"])
 def list_business_entities(
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[BusinessEntityResponse]:
     """Return the organization's business entities, newest first.
 
@@ -73,8 +74,8 @@ def list_business_entities(
     tenant can never see another's entities (Requirement 2.3).
     """
 
-    stmt = scope_select(
-        select(BusinessEntity), BusinessEntity, organization_id
+    stmt = scope_owned_select(
+        select(BusinessEntity), BusinessEntity, organization_id, user.id
     ).order_by(BusinessEntity.created_at.desc(), BusinessEntity.id.desc())
     entities = db.execute(stmt).scalars().all()
     return [BusinessEntityResponse.model_validate(e) for e in entities]
@@ -89,7 +90,7 @@ def create_business_entity(
     payload: BusinessEntityCreate,
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> BusinessEntityResponse:
     """Create a business entity for the caller's organization.
 
@@ -100,6 +101,7 @@ def create_business_entity(
 
     entity = BusinessEntity(
         organization_id=organization_id,
+        workspace_owner_id=user.id,
         name=payload.name,
         entity_type=payload.entity_type,
         description=payload.description,
@@ -107,14 +109,23 @@ def create_business_entity(
     )
     db.add(entity)
     db.flush()
+    AuditService(db).record(org_id=organization_id, actor_id=user.id,
+        action_type="CREATE_BUSINESS_ENTITY", target_type="BusinessEntity", target_id=entity.id)
     return BusinessEntityResponse.model_validate(entity)
 
 
 @router.delete("/{entity_id}", status_code=204)
 def delete_business_entity(entity_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    entity = db.scalar(select(BusinessEntity).where(BusinessEntity.id == entity_id, BusinessEntity.organization_id == user.organization_id))
+    entity = db.scalar(scope_owned_select(select(BusinessEntity), BusinessEntity,
+        user.organization_id, user.id).where(BusinessEntity.id == entity_id).with_for_update())
     if entity is None:
         raise not_found("Project / entity not found.")
+    if db.scalar(select(FactIdentity.id).where(
+        FactIdentity.organization_id == user.organization_id,
+        FactIdentity.workspace_owner_id == user.id,
+        FactIdentity.project_id == entity_id,
+    ).limit(1)) is not None:
+        raise HTTPException(409, "This project has fact history and cannot be deleted.")
     for model in (KnowledgeItem, ActionItem, DecisionRecord, EmailTaskSuggestion, EmailDraft):
         db.execute(update(model).where(model.organization_id == user.organization_id,
             model.business_entity_id == entity_id).values(business_entity_id=None))
@@ -159,7 +170,7 @@ def get_entity_brief(
             lambda p: p.generate_entity_brief(context),
         )
 
-    brief = BriefService(db).entity_brief(
+    brief = BriefService(db, owner_id=user.id).entity_brief(
         organization_id, entity_id, user.id, generator=generator
     )
     return BriefResponse.model_validate(brief)

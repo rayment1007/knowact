@@ -204,7 +204,7 @@ def test_confirmed_knowledge_always_has_evidence(
     item = _make_item(db_session, org, user, content=content)
     _classify_confirmed(db_session, item, sensitivity)
 
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=user.id)
 
     # evidence_seed is frequently empty/whitespace, forcing the fallback path.
     suggested = service.extract(

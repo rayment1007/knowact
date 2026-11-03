@@ -18,6 +18,7 @@ transports injected (no network, no real email). Covers:
 
 from __future__ import annotations
 
+from tests.ownership_fixtures import only_user_id
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -217,7 +218,7 @@ def test_delete_email_data_retains_confirmed_derived_knowledge(
     )
     db_session.add(source)
     db_session.flush()
-    knowledge = core_models.KnowledgeItem(
+    knowledge = core_models.KnowledgeItem(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id,
         source_item_id=source.id,
         summary="Client confirmed renewal.",
@@ -377,7 +378,7 @@ def test_answer_provenance_returns_grounding_set(
     org_id = seeded_user["organization"].id
 
     db_session.add(
-        core_models.KnowledgeItem(
+        core_models.KnowledgeItem(workspace_owner_id=only_user_id(db_session, org_id),
             organization_id=org_id,
             summary="Acme renewed the annual retainer.",
             evidence_text="Acme renewed the annual retainer.",

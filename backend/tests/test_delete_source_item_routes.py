@@ -12,6 +12,7 @@ database with cookie auth. Covers the two hardest guarantees for this resource:
 
 from __future__ import annotations
 
+from tests.ownership_fixtures import only_user_id
 from typing import Any
 from uuid import UUID
 
@@ -73,7 +74,7 @@ def test_delete_removes_item_and_classification_nulls_derived_fks(
         status=core_models.SuggestionStatus.CONFIRMED,
     )
     # Derived knowledge referencing the source item (retained, nulled).
-    knowledge = core_models.KnowledgeItem(
+    knowledge = core_models.KnowledgeItem(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id,
         source_item_id=item_id,
         summary="A confirmed fact.",

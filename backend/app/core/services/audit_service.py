@@ -36,7 +36,7 @@ from sqlalchemy.orm import Session
 
 from app.core.models import AuditLog
 from app.core.schemas import AuditFilter
-from app.dependencies import scope_select
+from app.core.ownership import scope_owned_select
 
 
 class AuditService:
@@ -106,6 +106,7 @@ class AuditService:
         self,
         org_id: UUID,
         filters: AuditFilter | None = None,
+        *, owner_id: UUID,
     ) -> list[AuditLog]:
         """Return audit entries for an organization, most-recent first.
 
@@ -125,7 +126,7 @@ class AuditService:
 
         filters = filters or AuditFilter()
 
-        stmt = scope_select(select(AuditLog), AuditLog, org_id)
+        stmt = scope_owned_select(select(AuditLog), AuditLog, org_id, owner_id)
         if filters.actor_id is not None:
             stmt = stmt.where(AuditLog.actor_id == filters.actor_id)
         if filters.action_type is not None:

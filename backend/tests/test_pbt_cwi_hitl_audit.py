@@ -24,6 +24,7 @@ Python 3.13); all helpers are named functions.
 
 from __future__ import annotations
 
+from tests.ownership_fixtures import only_user_id
 import tempfile
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
@@ -101,7 +102,7 @@ _CALENDARS = [
 ]
 
 
-def _audit_count(db: Session, org_id: UUID) -> int:
+def _audit_count(db: Session, org_id: UUID, action_type: str | None = None) -> int:
     """Return the number of audit rows currently scoped to the organization."""
 
     return int(
@@ -109,6 +110,7 @@ def _audit_count(db: Session, org_id: UUID) -> int:
             select(func.count())
             .select_from(AuditLog)
             .where(AuditLog.organization_id == org_id)
+            .where(AuditLog.action_type == action_type if action_type else True)
         ).scalar_one()
     )
 
@@ -232,7 +234,7 @@ def test_cwi_hitl_and_audit_completeness(
         IntegrationServiceEnum.GOOGLE_CALENDAR,
         [CALENDAR_EVENTS_SCOPE],
     )
-    action = ActionItem(
+    action = ActionItem(workspace_owner_id=only_user_id(db_session, org_id),
         organization_id=org_id,
         title="Confirmed action",
         description="Do the thing",
@@ -257,6 +259,8 @@ def test_cwi_hitl_and_audit_completeness(
             connection_id=calendar_connection.id,
             google_calendar_id="primary",
             summary=summary or None,
+            all_day=True,
+            all_day_date="2026-11-03",
         ),
     )
     assert _audit_count(db_session, org_id) - before == 1
@@ -309,14 +313,16 @@ def test_cwi_hitl_and_audit_completeness(
     draft_service.create_gmail_draft(org_id, user_id, draft.id)
     assert _audit_count(db_session, org_id) - before == 1
 
-    before = _audit_count(db_session, org_id)
+    # Sending also captures a local source (with its own INGEST_SOURCE audit).
+    # The external send itself must still have exactly one SEND_EMAIL audit.
+    before = _audit_count(db_session, org_id, "SEND_EMAIL")
     sent = draft_service.send_draft(org_id, user_id, draft.id, confirm=True)
-    assert _audit_count(db_session, org_id) - before == 1
+    assert _audit_count(db_session, org_id, "SEND_EMAIL") - before == 1
     assert sent.status == EmailDraftStatus.SENT
 
     # -- copilot ACT: suggested artifact, no mutation, no audit -------------
     db_session.add(
-        core_models.KnowledgeItem(
+        core_models.KnowledgeItem(workspace_owner_id=only_user_id(db_session, org_id),
             organization_id=org_id,
             summary="Acme renewed the annual retainer.",
             evidence_text="Acme renewed the annual retainer.",
@@ -368,7 +374,7 @@ def test_cwi_hitl_and_audit_completeness(
     before = _audit_count(db_session, org_id)
     result = privacy.delete_email_data(org_id, user_id, scope="ALL")
     assert _audit_count(db_session, org_id) - before == 1
-    assert result.deleted_records == n_emails
+    assert result.deleted_records == n_emails + 1  # includes the captured sent email
 
     # -- disconnect / revoke ------------------------------------------------
     before = _audit_count(db_session, org_id)

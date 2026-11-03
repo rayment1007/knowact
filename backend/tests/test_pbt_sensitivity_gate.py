@@ -193,7 +193,7 @@ def test_sensitivity_gate_refuses_unacknowledged_and_persists_nothing(
     org, user = _make_org_and_user(db_session)
     item = _make_item(db_session, org, user, content=content)
     _classify_highly_sensitive(db_session, item, business_category)
-    service = KnowledgeService(db_session)
+    service = KnowledgeService(db_session, owner_id=user.id)
 
     # acknowledged=False must refuse with 409 and leave nothing behind.
     with pytest.raises(HTTPException) as exc:

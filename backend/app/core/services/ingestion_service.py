@@ -38,16 +38,17 @@ from app.core.models import (
 )
 from app.core.schemas import InboxFilter, SourceItemCreate
 from app.core.services.audit_service import AuditService
-from app.dependencies import not_found, scope_select
+from app.dependencies import not_found
+from app.core.ownership import PersonalScope
 
 #: Audit action type recorded when a source item is permanently deleted.
 DELETE_SOURCE_ITEM = "DELETE_SOURCE_ITEM"
 
 
-class IngestionService:
+class IngestionService(PersonalScope):
     """Collect, list, fetch, dismiss, and delete :class:`SourceItem` rows."""
 
-    def __init__(self, db: Session, audit: AuditService | None = None) -> None:
+    def __init__(self, db: Session, audit: AuditService | None = None, *, owner_id: UUID) -> None:
         """Bind the service to a request-scoped session.
 
         The session's transaction is owned by the caller (the route); this
@@ -61,6 +62,9 @@ class IngestionService:
                 delete. Defaults to a fresh instance bound to ``db``.
         """
 
+        if owner_id is None:
+            raise ValueError("A personal workspace owner is required.")
+        self.owner_id = owner_id
         self.db = db
         self.audit = audit or AuditService(db)
 
@@ -86,6 +90,7 @@ class IngestionService:
         Returns:
             The persisted (flushed) :class:`SourceItem` with status ``NEW``.
         """
+        self._require_actor(user_id)
 
         item = SourceItem(
             organization_id=org_id,
@@ -131,7 +136,7 @@ class IngestionService:
 
         filters = filters or InboxFilter()
 
-        stmt = scope_select(select(SourceItem), SourceItem, org_id)
+        stmt = self._scope(select(SourceItem), SourceItem, org_id)
         if filters.review_pending:
             stmt = stmt.where(
                 SourceItem.status.notin_([SourceStatus.ARCHIVED, SourceStatus.DISMISSED]),
@@ -173,7 +178,7 @@ class IngestionService:
                 belongs to another organization (Requirement 2.3).
         """
 
-        stmt = scope_select(select(SourceItem), SourceItem, org_id).where(
+        stmt = self._scope(select(SourceItem), SourceItem, org_id).where(
             SourceItem.id == item_id
         )
         item = self.db.execute(stmt).scalar_one_or_none()
@@ -195,6 +200,8 @@ class IngestionService:
 
         stmt = (
             select(ClassificationResult)
+            .join(SourceItem, SourceItem.id == ClassificationResult.source_item_id)
+            .where(SourceItem.created_by == self.owner_id)
             .where(ClassificationResult.source_item_id == item_id)
             .where(ClassificationResult.status != SuggestionStatus.REJECTED)
         )
@@ -221,6 +228,7 @@ class IngestionService:
         Returns:
             The updated :class:`SourceItem` with status ``DISMISSED``.
         """
+        self._require_actor(actor_id)
 
         item = self.get(org_id, item_id)
         item.status = SourceStatus.DISMISSED
@@ -256,14 +264,30 @@ class IngestionService:
         Raises:
             HTTPException: ``404`` if the item does not exist for the org.
         """
+        self._require_actor(actor_id)
 
         item = self.get(org_id, item_id)
 
-        from app.modules.cwi.models import EmailMessageRecord
+        from app.modules.cwi.models import EmailMessageRecord, IntegrationConnection
+        from app.core.services.fact_lifecycle import mark_fact_sources_removed
         from app.modules.cwi.services.source_proposal_service import discard_unapproved
-        discard_unapproved(self.db, org_id, "source", [item.id])
+        # Match fact-source read order (email, then its raw source) so removal
+        # cannot race a snapshot capture or approve content after deletion.
         email_ids = list(self.db.scalars(select(EmailMessageRecord.id).where(
-            EmailMessageRecord.organization_id == org_id, EmailMessageRecord.source_item_id == item.id)))
+            EmailMessageRecord.organization_id == org_id, EmailMessageRecord.source_item_id == item.id,
+            EmailMessageRecord.integration_connection_id.in_(select(IntegrationConnection.id).where(
+                IntegrationConnection.organization_id == org_id, IntegrationConnection.user_id == actor_id)),
+        ).order_by(EmailMessageRecord.id).with_for_update()))
+        item = self.db.scalar(select(SourceItem).where(SourceItem.id == item.id,
+            SourceItem.organization_id == org_id, SourceItem.created_by == actor_id)
+            .with_for_update().execution_options(populate_existing=True))
+        if item is None:
+            raise not_found("Source not found.")
+        mark_fact_sources_removed(self.db, org_id=org_id, owner_id=actor_id,
+            source_kind="source", source_ids=[item.id])
+        mark_fact_sources_removed(self.db, org_id=org_id, owner_id=actor_id,
+            source_kind="email", source_ids=email_ids)
+        discard_unapproved(self.db, org_id, "source", [item.id])
         discard_unapproved(self.db, org_id, "email", email_ids)
 
         # Classification results only exist for this source item; delete them.

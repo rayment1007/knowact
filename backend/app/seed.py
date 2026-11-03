@@ -175,7 +175,7 @@ def _seed_users(session: Session, org: Organization) -> dict[str, User]:
 
 
 def _seed_business_entities(
-    session: Session, org: Organization
+    session: Session, org: Organization, user: User
 ) -> dict[str, BusinessEntity]:
     """Seed the business entities knowledge and actions are organized around.
 
@@ -235,6 +235,7 @@ def _seed_business_entities(
             session,
             BusinessEntity,
             organization_id=org.id,
+            workspace_owner_id=user.id,
             name=spec["name"],
             entity_type=spec["entity_type"],
             defaults={
@@ -385,7 +386,8 @@ def seed(session: Session) -> None:
 
     org = _seed_organization(session)
     users = _seed_users(session, org)
-    _seed_business_entities(session, org)
+    for user in users.values():
+        _seed_business_entities(session, org, user)
     _seed_source_items(session, org, users)
 
 

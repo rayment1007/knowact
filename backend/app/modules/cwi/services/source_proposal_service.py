@@ -160,11 +160,11 @@ def update(db, user, row, version, payload, approve=False):
         if fingerprint != row.source_fingerprint:
             raise HTTPException(409, "The original source changed. Discard this draft and generate a new one before approving.")
         if row.target == "knowledge":
-            result = KnowledgeItem(organization_id=user.organization_id, source_item_id=source.id if source else None,
+            result = KnowledgeItem(organization_id=user.organization_id, workspace_owner_id=user.id, source_item_id=source.id if source else None,
                 summary=values["summary"], key_points=values["key_points"], evidence_text=row.evidence_text,
                 knowledge_type="CONTEXT", status="CONFIRMED")
         else:
-            result = ActionItem(organization_id=user.organization_id, owner_id=user.id,
+            result = ActionItem(organization_id=user.organization_id, workspace_owner_id=user.id, owner_id=user.id,
                 title=values["title"], description=values["description"],
                 due_date=date.fromisoformat(values["due_date"]) if values["due_date"] else None,
                 status="OPEN", evidence_text=row.evidence_text, ai_generated=True)

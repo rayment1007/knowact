@@ -8,6 +8,7 @@ from sqlalchemy import String, and_, case, cast, func, literal, or_, select, uni
 from sqlalchemy.orm import Session
 
 from app.core.models import ActionItem, AuditLog, ClassificationResult, KnowledgeItem, SourceItem, User
+from app.core.ownership import owner_predicate
 from app.core.schemas import SourceItemResponse
 from app.database import get_db
 from app.dependencies import get_current_user, not_found
@@ -33,10 +34,13 @@ def _classification_state():
 
 
 def _rows(model, kind, source_type, title, content, state, date, user):
-    return select(cast(model.id, String).label("id"), literal(kind).label("kind"),
+    query = select(cast(model.id, String).label("id"), literal(kind).label("kind"),
         source_type.label("source_type"), title.label("title"),
         func.substr(func.coalesce(content, ""), 1, 240).label("excerpt"),
         cast(state, String).label("status"), date.label("updated_at")).where(model.organization_id == user.organization_id)
+    if model in (SourceItem, KnowledgeItem, ActionItem):
+        query = query.where(owner_predicate(model, user.id))
+    return query
 
 
 def _proposal_rows(user):
@@ -126,7 +130,7 @@ def items(section: Section = "sources", q: str = Query("", max_length=200),
     query = select(rows)
     if due is not None and section == "actions":
         query = query.where(rows.c.kind == "action", rows.c.id.in_(select(cast(ActionItem.id, String)).where(
-            ActionItem.organization_id == user.organization_id, ActionItem.due_date == due,
+            ActionItem.organization_id == user.organization_id, owner_predicate(ActionItem, user.id), ActionItem.due_date == due,
             ActionItem.status.in_(["OPEN", "IN_PROGRESS"]))))
     if source_type != "all" and section == "sources":
         query = query.where(rows.c.source_type == source_type)
@@ -210,6 +214,7 @@ def source_links(kind: SourceKind, item_id: UUID, limit: int = Query(10, ge=1, l
     approved = select(SourceProposal.result_id).where(SourceProposal.organization_id == user.organization_id,
         SourceProposal.user_id == user.id, SourceProposal.status == "APPROVED", source_match)
     knowledge_ids = select(KnowledgeItem.id).where(KnowledgeItem.organization_id == user.organization_id,
+        owner_predicate(KnowledgeItem, user.id),
         or_(KnowledgeItem.source_item_id == source_id if source_id else literal(False),
             KnowledgeItem.id.in_(approved.where(SourceProposal.target == "knowledge"))))
     knowledge = _rows(KnowledgeItem, "knowledge", literal("knowledge"), KnowledgeItem.summary,
@@ -250,7 +255,8 @@ def suggestion(item_id: UUID, db: Session = Depends(get_db), user: User = Depend
 
 @router.get("/actions/{item_id}/context")
 def action_context(item_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    action = db.scalar(select(ActionItem).where(ActionItem.id == item_id, ActionItem.organization_id == user.organization_id))
+    action = db.scalar(select(ActionItem).where(ActionItem.id == item_id, ActionItem.organization_id == user.organization_id,
+        owner_predicate(ActionItem, user.id)))
     if action is None:
         raise not_found("Action not found.")
     links = db.scalars(select(CalendarEventLink).join(IntegrationConnection).where(CalendarEventLink.action_item_id == item_id,
@@ -264,7 +270,7 @@ def action_context(item_id: UUID, db: Session = Depends(get_db), user: User = De
     origins = result_origins(db, user, "action", item_id)
     if not origins and action.knowledge_item_id:
         knowledge = db.scalar(select(KnowledgeItem).where(KnowledgeItem.id == action.knowledge_item_id,
-            KnowledgeItem.organization_id == user.organization_id))
+            KnowledgeItem.organization_id == user.organization_id, owner_predicate(KnowledgeItem, user.id)))
         if knowledge:
             origins = result_origins(db, user, "knowledge", knowledge.id, knowledge.source_item_id)
     if not origins and email_id:
@@ -274,7 +280,8 @@ def action_context(item_id: UUID, db: Session = Depends(get_db), user: User = De
 
 @router.get("/knowledge/{item_id}/origin")
 def knowledge_origin(item_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    item = db.scalar(select(KnowledgeItem).where(KnowledgeItem.id == item_id, KnowledgeItem.organization_id == user.organization_id))
+    item = db.scalar(select(KnowledgeItem).where(KnowledgeItem.id == item_id, KnowledgeItem.organization_id == user.organization_id,
+        owner_predicate(KnowledgeItem, user.id)))
     if not item:
         raise not_found("Knowledge not found.")
     return result_origins(db, user, "knowledge", item.id, item.source_item_id)

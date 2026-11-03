@@ -129,7 +129,7 @@ def _fixed_classifier(
 def test_classify_persists_suggested_result(db_session: Session) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
 
     result = service.classify(org.id, item.id, classifier=_fixed_classifier())
 
@@ -148,7 +148,7 @@ def test_classify_with_default_mock_provider(db_session: Session) -> None:
 
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
 
     result = service.classify(org.id, item.id)
 
@@ -161,7 +161,7 @@ def test_classify_cross_org_is_404(db_session: Session) -> None:
     org_a, user_a = _make_org_and_user(db_session, "Org A", "a@example.com")
     org_b, _user_b = _make_org_and_user(db_session, "Org B", "b@example.com")
     item = _make_item(db_session, org_a, user_a)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user_a.id)
 
     with pytest.raises(HTTPException) as exc:
         service.classify(org_b.id, item.id, classifier=_fixed_classifier())
@@ -175,7 +175,7 @@ def test_reclassify_rejects_previous_and_keeps_single_active(
 
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
 
     first = service.classify(
         org.id,
@@ -204,7 +204,7 @@ def test_reclassify_rejects_previous_and_keeps_single_active(
 def test_confirm_sets_confirmed_classified_and_one_audit(db_session: Session) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
     service.classify(org.id, item.id, classifier=_fixed_classifier())
 
     before = _count_audit(db_session)
@@ -225,7 +225,7 @@ def test_confirm_sets_confirmed_classified_and_one_audit(db_session: Session) ->
 def test_confirm_persists_override(db_session: Session) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
     service.classify(
         org.id,
         item.id,
@@ -247,7 +247,7 @@ def test_confirm_persists_override(db_session: Session) -> None:
 def test_confirm_without_classification_is_404(db_session: Session) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
 
     with pytest.raises(HTTPException) as exc:
         service.confirm(org.id, item.id, actor_id=user.id)
@@ -259,7 +259,7 @@ def test_confirm_atomic_audit_rolls_back_with_caller(db_session: Session) -> Non
 
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
     service.classify(org.id, item.id, classifier=_fixed_classifier())
 
     savepoint = db_session.begin_nested()
@@ -279,7 +279,7 @@ def test_confirm_atomic_audit_rolls_back_with_caller(db_session: Session) -> Non
 def test_reject_sets_rejected_and_retains_row(db_session: Session) -> None:
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
     created = service.classify(org.id, item.id, classifier=_fixed_classifier())
 
     result = service.reject(org.id, item.id, actor_id=user.id)
@@ -301,7 +301,7 @@ def test_classify_after_reject_allows_new_active_result(db_session: Session) -> 
 
     org, user = _make_org_and_user(db_session, "Org A", "a@example.com")
     item = _make_item(db_session, org, user)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user.id)
 
     service.classify(org.id, item.id, classifier=_fixed_classifier())
     service.reject(org.id, item.id, actor_id=user.id)
@@ -321,9 +321,9 @@ def test_reject_cross_org_is_404(db_session: Session) -> None:
     org_a, user_a = _make_org_and_user(db_session, "Org A", "a@example.com")
     org_b, user_b = _make_org_and_user(db_session, "Org B", "b@example.com")
     item = _make_item(db_session, org_a, user_a)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=user_a.id)
     service.classify(org_a.id, item.id, classifier=_fixed_classifier())
 
     with pytest.raises(HTTPException) as exc:
-        service.reject(org_b.id, item.id, actor_id=user_b.id)
+        ClassificationService(db_session, owner_id=user_b.id).reject(org_b.id, item.id, actor_id=user_b.id)
     assert exc.value.status_code == 404

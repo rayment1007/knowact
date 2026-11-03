@@ -163,6 +163,7 @@ def test_request_draft_grounds_referenced_facts(
 
     knowledge = KnowledgeItem(
         organization_id=seeded_user["organization"].id,
+        workspace_owner_id=seeded_user["user"].id,
         summary="Client prefers quarterly reviews.",
         key_points=["quarterly"],
         evidence_text="Client said quarterly reviews are best.",

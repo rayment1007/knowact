@@ -146,7 +146,7 @@ def test_classify_never_auto_confirms(
     """classify(...) persists SUGGESTED and never CONFIRMED (Requirements 4.2, 5.5)."""
 
     item = _fresh_item(db_session, title=title, content=content)
-    service = ClassificationService(db_session)
+    service = ClassificationService(db_session, owner_id=item.created_by)
 
     result = service.classify(
         item.organization_id, item.id, classifier=_stub_classifier(output)

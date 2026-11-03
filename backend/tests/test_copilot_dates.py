@@ -31,11 +31,11 @@ def test_today_uses_user_day_and_real_due_dates_without_promoting_old_email(cwi_
     monkeypatch.setattr(module, "datetime", FixedDatetime)
     _login(cwi_client, seeded_user)
     org = seeded_user["organization"].id
-    _seed_confirmed_knowledge(db_session, org, "A meeting was planned for September 24. Follow up this Sunday.")
+    _seed_confirmed_knowledge(db_session, org, seeded_user["user"].id, "A meeting was planned for September 24. Follow up this Sunday.")
     for title, due, status in [("Overdue task", date(2026, 9, 30), "OPEN"),
             ("Due today task", date(2026, 10, 1), "IN_PROGRESS"), ("Future task", date(2026, 10, 2), "OPEN"),
             ("Undated task", None, "OPEN"), ("Completed task", date(2026, 10, 1), "DONE")]:
-        db_session.add(ActionItem(organization_id=org, title=title, due_date=due, status=status))
+        db_session.add(ActionItem(organization_id=org, workspace_owner_id=seeded_user["user"].id, title=title, due_date=due, status=status))
     db_session.flush()
     def no_rag(*args):
         raise AssertionError("An exact date-list request must not rely on the LLM to infer dates.")
@@ -85,7 +85,7 @@ def test_calendar_today_uses_actual_event_times_and_owner_scope(cwi_client, db_s
 def test_general_answer_receives_clock_and_action_metadata_and_hides_ids(cwi_client, db_session, seeded_user, monkeypatch):
     monkeypatch.setattr(module, "datetime", FixedDatetime)
     _login(cwi_client, seeded_user)
-    action = ActionItem(organization_id=seeded_user["organization"].id, title="Review draft", status="IN_PROGRESS", due_date=date(2026, 9, 24))
+    action = ActionItem(organization_id=seeded_user["organization"].id, workspace_owner_id=seeded_user["user"].id, title="Review draft", status="IN_PROGRESS", due_date=date(2026, 9, 24))
     db_session.add(action); db_session.flush()
     def answer(context):
         assert context.current_datetime.isoformat().startswith("2026-10-01T01:00:00+08:00")
@@ -99,7 +99,7 @@ def test_general_answer_receives_clock_and_action_metadata_and_hides_ids(cwi_cli
 
 
 def test_no_valid_citation_cannot_be_presented_as_a_grounded_answer(cwi_client, db_session, seeded_user, monkeypatch):
-    _login(cwi_client, seeded_user); _seed_confirmed_knowledge(db_session, seeded_user["organization"].id)
+    _login(cwi_client, seeded_user); _seed_confirmed_knowledge(db_session, seeded_user["organization"].id, seeded_user["user"].id)
     monkeypatch.setattr(module, "call_with_fallback", lambda *args: CopilotAnswerOutput(answer="Unsupported claim", cited_source_ids=[uuid4()]))
     body = cwi_client.post("/api/copilot/ask", json={"question": "What changed?"}).json()
     assert body["insufficient_evidence"] and "Unsupported claim" not in body["answer"]

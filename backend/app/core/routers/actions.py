@@ -49,7 +49,7 @@ def list_actions(
     business_entity_id: UUID | None = None,
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[ActionItemResponse]:
     """Return the organization's action items, newest first (Requirement 8.3).
 
@@ -60,7 +60,7 @@ def list_actions(
     """
 
     filters = ActionListFilter(status=status, business_entity_id=business_entity_id)
-    items = ActionService(db).list_open(organization_id, filters)
+    items = ActionService(db, owner_id=user.id).list_open(organization_id, filters)
     return [ActionItemResponse.model_validate(item) for item in items]
 
 
@@ -69,7 +69,7 @@ def get_action(
     action_id: UUID,
     db: Session = Depends(get_db),
     organization_id: UUID = Depends(get_current_organization_id),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> ActionItemResponse:
     """Return one action for a direct Action Center deep link.
 
@@ -77,7 +77,7 @@ def get_action(
     ``404`` so the endpoint does not disclose cross-tenant identifiers.
     """
 
-    action = ActionService(db).get(organization_id, action_id)
+    action = ActionService(db, owner_id=user.id).get(organization_id, action_id)
     return ActionItemResponse.model_validate(action)
 
 
@@ -104,7 +104,7 @@ def create_action(
     that exists but is not confirmed yields ``409``.
     """
 
-    action = ActionService(db).create(organization_id, user.id, payload)
+    action = ActionService(db, owner_id=user.id).create(organization_id, user.id, payload)
     return ActionItemResponse.model_validate(action)
 
 
@@ -123,7 +123,7 @@ def update_action(
     A non-existent or cross-tenant id yields ``404`` (Requirement 2.3).
     """
 
-    action = ActionService(db).update(organization_id, action_id, user.id, payload)
+    action = ActionService(db, owner_id=user.id).update(organization_id, action_id, user.id, payload)
     return ActionItemResponse.model_validate(action)
 
 
@@ -145,5 +145,5 @@ def delete_action(
     cross-tenant id yields ``404``.
     """
 
-    ActionService(db).delete(organization_id, action_id, user.id)
+    ActionService(db, owner_id=user.id).delete(organization_id, action_id, user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

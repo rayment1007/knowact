@@ -56,7 +56,8 @@ from app.core.models import (
 from app.core.schemas import ClassificationOverride
 from app.core.services.ai_provider import ClassificationOutput, MockAIProvider
 from app.core.services.audit_service import AuditService
-from app.dependencies import not_found, scope_select
+from app.dependencies import not_found
+from app.core.ownership import PersonalScope
 
 # A classifier turns a source item's ``(content, title)`` into a structured
 # :class:`ClassificationOutput`. Routes wrap the provider call in
@@ -67,10 +68,10 @@ Classifier = Callable[[str, str], ClassificationOutput]
 CONFIRM_CLASSIFICATION = "CONFIRM_CLASSIFICATION"
 
 
-class ClassificationService:
+class ClassificationService(PersonalScope):
     """Produce AI classification suggestions and apply human confirmations."""
 
-    def __init__(self, db: Session, audit: AuditService | None = None) -> None:
+    def __init__(self, db: Session, audit: AuditService | None = None, *, owner_id: UUID) -> None:
         """Bind the service to a request-scoped session.
 
         Args:
@@ -82,6 +83,9 @@ class ClassificationService:
                 same transaction. Defaults to a fresh instance bound to ``db``.
         """
 
+        if owner_id is None:
+            raise ValueError("A personal workspace owner is required.")
+        self.owner_id = owner_id
         self.db = db
         self.audit = audit or AuditService(db)
 
@@ -90,7 +94,7 @@ class ClassificationService:
     def _get_item(self, org_id: UUID, item_id: UUID) -> SourceItem:
         """Resolve an org-scoped source item or raise ``404`` (Requirement 2.3)."""
 
-        stmt = scope_select(select(SourceItem), SourceItem, org_id).where(
+        stmt = self._scope(select(SourceItem), SourceItem, org_id).where(
             SourceItem.id == item_id
         )
         item = self.db.execute(stmt).scalar_one_or_none()
@@ -210,6 +214,7 @@ class ClassificationService:
             HTTPException: ``404`` if the item or an active classification does
                 not exist for the organization.
         """
+        self._require_actor(actor_id)
 
         item = self._get_item(org_id, item_id)
         result = self._active_result(item.id)
@@ -285,6 +290,7 @@ class ClassificationService:
             HTTPException: ``404`` if the item or an active classification does
                 not exist for the organization.
         """
+        self._require_actor(actor_id)
 
         item = self._get_item(org_id, item_id)
         result = self._active_result(item.id)

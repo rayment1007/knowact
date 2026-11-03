@@ -38,7 +38,7 @@ def test_default_and_custom_window_deletion_allows_resync(client, db_session, se
     assert service.sync_now(user.organization_id, user.id, conn.id).records_created == 1
     record = db_session.scalar(select(EmailMessageRecord))
     source_id, record_id = record.source_item_id, record.id
-    kept = KnowledgeItem(organization_id=user.organization_id, source_item_id=source_id, knowledge_type="FACT", summary="Reviewed fact", evidence_text="Evidence", status="CONFIRMED")
+    kept = KnowledgeItem(organization_id=user.organization_id, workspace_owner_id=user.id, source_item_id=source_id, knowledge_type="FACT", summary="Reviewed fact", evidence_text="Evidence", status="CONFIRMED")
     db_session.add(kept); db_session.flush()
     assert client.delete(f"/api/gmail/messages/{record_id}").status_code == 204
     db_session.expire_all()
@@ -96,7 +96,7 @@ def test_sent_in_knowact_sync_does_not_create_ai_reviews(client, db_session, see
 def test_all_day_real_http_retry_keeps_dates_and_sync_links_action(cwi_client, db_session, seeded_user, fake_calendar):
     _login(cwi_client, seeded_user); user = seeded_user["user"]
     conn_id = _connect_calendar(cwi_client)
-    action = _make_action(db_session, user.organization_id)
+    action = _make_action(db_session, user.organization_id, user.id)
     bodies = []
     def transport(request):
         if request.method == "GET":
@@ -128,7 +128,7 @@ def test_all_day_real_http_retry_keeps_dates_and_sync_links_action(cwi_client, d
 
 def test_invalid_calendar_times_make_no_external_call(cwi_client, db_session, seeded_user, fake_calendar):
     _login(cwi_client, seeded_user); user = seeded_user["user"]
-    conn_id = _connect_calendar(cwi_client); action = _make_action(db_session, user.organization_id)
+    conn_id = _connect_calendar(cwi_client); action = _make_action(db_session, user.organization_id, user.id)
     for bad in [{"all_day": True}, {"start": "2026-10-02T14:00:00+08:00", "end": "2026-10-02T13:00:00+08:00"}]:
         response = cwi_client.post(f"/api/actions/{action.id}/add-to-calendar", json={"connection_id": conn_id, "google_calendar_id": "primary", **bad})
         assert response.status_code == 422
@@ -168,11 +168,11 @@ def test_bounded_calendar_sync_keeps_outside_range_and_other_calendars(cwi_clien
 
 def test_delete_project_unlinks_records_and_today_filter(client, db_session, seeded_user):
     _login(client, seeded_user); user = seeded_user["user"]
-    entity = BusinessEntity(organization_id=user.organization_id, name="Project A", entity_type="PROJECT")
+    entity = BusinessEntity(organization_id=user.organization_id, workspace_owner_id=user.id, name="Project A", entity_type="PROJECT")
     db_session.add(entity); db_session.flush()
-    knowledge = KnowledgeItem(organization_id=user.organization_id, business_entity_id=entity.id, knowledge_type="FACT", summary="Keep me", evidence_text="Evidence", status="CONFIRMED")
-    today = ActionItem(organization_id=user.organization_id, business_entity_id=entity.id, title="Due today", due_date=date(2026, 10, 2), status="OPEN")
-    tomorrow = ActionItem(organization_id=user.organization_id, business_entity_id=entity.id, title="Tomorrow", due_date=date(2026, 10, 3), status="OPEN")
+    knowledge = KnowledgeItem(organization_id=user.organization_id, workspace_owner_id=user.id, business_entity_id=entity.id, knowledge_type="FACT", summary="Keep me", evidence_text="Evidence", status="CONFIRMED")
+    today = ActionItem(organization_id=user.organization_id, workspace_owner_id=user.id, business_entity_id=entity.id, title="Due today", due_date=date(2026, 10, 2), status="OPEN")
+    tomorrow = ActionItem(organization_id=user.organization_id, workspace_owner_id=user.id, business_entity_id=entity.id, title="Tomorrow", due_date=date(2026, 10, 3), status="OPEN")
     db_session.add_all([knowledge, today, tomorrow]); db_session.flush()
     assert client.delete(f"/api/business-entities/{entity.id}").status_code == 204
     db_session.expire_all()

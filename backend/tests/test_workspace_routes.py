@@ -1,5 +1,6 @@
 """Workspace search and read-only Calendar sync against local fake providers."""
 from uuid import UUID, uuid4
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -14,8 +15,8 @@ def test_search_original_text_actions_files_and_literal_wildcards(client, db_ses
     user = seeded_user["user"]
     source = SourceItem(organization_id=user.organization_id, created_by=user.id,
         source_type=SourceType.MANUAL, title="Project note", content="UAT marker 100% complete")
-    action = ActionItem(organization_id=user.organization_id, title="Prepare UAT", description="Follow up", ai_generated=False)
-    knowledge = KnowledgeItem(organization_id=user.organization_id, summary="UAT fact",
+    action = ActionItem(organization_id=user.organization_id, workspace_owner_id=user.id, title="Prepare UAT", description="Follow up", ai_generated=False)
+    knowledge = KnowledgeItem(organization_id=user.organization_id, workspace_owner_id=user.id, summary="UAT fact",
         evidence_text="UAT evidence", knowledge_type="FACT")
     asset = DocumentAsset(organization_id=user.organization_id, uploaded_by=user.id,
         filename="Project.txt", mime_type="text/plain", storage_key="test", checksum="abc")
@@ -61,8 +62,10 @@ def test_workspace_requires_login(client):
 def test_calendar_sync_is_read_only_idempotent_and_searchable(cwi_client, fake_calendar, db_session, seeded_user):
     _login(cwi_client, seeded_user)
     connection_id = _connect_calendar(cwi_client)
+    # Keep the event inside the configured sync window as the real clock moves.
+    event_day = datetime.now(timezone.utc).date() + timedelta(days=1)
     fake_calendar.source_events = [{"id": "event-1", "summary": "UAT review", "description": "Bring checklist",
-        "start": {"date": "2026-09-29"}, "end": {"date": "2026-09-30"}}]
+        "start": {"date": event_day.isoformat()}, "end": {"date": (event_day + timedelta(days=1)).isoformat()}}]
     for _ in range(2):
         response = cwi_client.post(f"/api/calendar/{connection_id}/sync-now")
         assert response.status_code == 200, response.text
@@ -155,7 +158,7 @@ def test_review_counts_match_review_links_and_only_count_pending_ai_suggestions(
         if suggestion:
             db_session.add(ClassificationResult(source_item_id=source.id, relevance="WORK_RELATED", business_category="PROJECT", sensitivity="INTERNAL", confidence=0.9, status=suggestion))
     for state in ["SUGGESTED", "CONFIRMED", "REJECTED"]:
-        db_session.add(KnowledgeItem(organization_id=user.organization_id, summary=state, evidence_text="evidence", knowledge_type="FACT", status=state))
+        db_session.add(KnowledgeItem(organization_id=user.organization_id, workspace_owner_id=user.id, summary=state, evidence_text="evidence", knowledge_type="FACT", status=state))
     db_session.flush()
     result = client.get("/api/workspace/summary")
     assert result.status_code == 200, result.text

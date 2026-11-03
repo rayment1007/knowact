@@ -310,9 +310,12 @@ class DocumentService:
         transaction. Org-scoped: a cross-org id yields ``404``.
         """
 
-        asset = self._get_asset(org_id, user_id, document_asset_id)
+        asset = self._get_asset(org_id, user_id, document_asset_id, for_update=True)
 
+        from app.core.services.fact_lifecycle import mark_fact_sources_removed
         from app.modules.cwi.services.source_proposal_service import discard_unapproved
+        mark_fact_sources_removed(self.db, org_id=org_id, owner_id=user_id,
+            source_kind="file", source_ids=[asset.id])
         discard_unapproved(self.db, org_id, "file", [asset.id])
 
         # Cascade chunk deletion explicitly with a bulk DELETE (portable across

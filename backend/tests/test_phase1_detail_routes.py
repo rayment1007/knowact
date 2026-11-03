@@ -56,6 +56,7 @@ def _seed_records(
 ) -> dict[str, Any]:
     action = core_models.ActionItem(
         organization_id=organization_id,
+        workspace_owner_id=user_id,
         title="Follow up with the client",
         description="Send the requested summary.",
         owner_id=user_id,

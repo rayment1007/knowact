@@ -59,10 +59,13 @@ from app.config import Settings, get_settings
 from app.core.models import (
     ActionItem,
     ActionStatus,
+    BusinessEntity,
     DecisionRecord,
     KnowledgeItem,
+    SourceItem,
     SuggestionStatus,
 )
+from app.core.ownership import scope_owned_select
 from app.core.services.ai_provider import (
     AIProvider,
     ActionView,
@@ -237,7 +240,7 @@ class EmailDraftService:
     # -- Scoped lookups -----------------------------------------------------
 
     def _get_scoped(
-        self, org_id: UUID, user_id: UUID, draft_id: UUID
+        self, org_id: UUID, user_id: UUID, draft_id: UUID, *, for_update: bool = False
     ) -> EmailDraft:
         """Return an org-and-user-scoped draft or ``404``."""
 
@@ -245,6 +248,8 @@ class EmailDraftService:
             EmailDraft.id == draft_id,
             EmailDraft.user_id == user_id,
         )
+        if for_update:
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
         draft = self.db.execute(stmt).scalar_one_or_none()
         if draft is None:
             raise not_found("Email draft not found.")
@@ -360,12 +365,12 @@ class EmailDraftService:
         return views, thread_id
 
     def _confirmed_knowledge(
-        self, org_id: UUID, business_entity_id: UUID | None
+        self, org_id: UUID, user_id: UUID, business_entity_id: UUID | None
     ) -> tuple[list[KnowledgeView], list[KnowledgeView]]:
         """Return (client knowledge, meeting memories) — confirmed only, bounded."""
 
         stmt = (
-            scope_select(select(KnowledgeItem), KnowledgeItem, org_id)
+            scope_owned_select(select(KnowledgeItem), KnowledgeItem, org_id, user_id)
             .where(KnowledgeItem.status == SuggestionStatus.CONFIRMED)
             .order_by(KnowledgeItem.created_at.desc(), KnowledgeItem.id.desc())
             .limit(_MAX_CONTEXT_ITEMS * 2)
@@ -394,10 +399,10 @@ class EmailDraftService:
         return knowledge, memories
 
     def _open_actions(
-        self, org_id: UUID, business_entity_id: UUID | None
+        self, org_id: UUID, user_id: UUID, business_entity_id: UUID | None
     ) -> list[ActionView]:
         stmt = (
-            scope_select(select(ActionItem), ActionItem, org_id)
+            scope_owned_select(select(ActionItem), ActionItem, org_id, user_id)
             .where(ActionItem.status == ActionStatus.OPEN)
             .order_by(ActionItem.created_at.desc(), ActionItem.id.desc())
             .limit(_MAX_CONTEXT_ITEMS)
@@ -416,10 +421,10 @@ class EmailDraftService:
         ]
 
     def _confirmed_decisions(
-        self, org_id: UUID, business_entity_id: UUID | None
+        self, org_id: UUID, user_id: UUID, business_entity_id: UUID | None
     ) -> list[DecisionView]:
         stmt = (
-            scope_select(select(DecisionRecord), DecisionRecord, org_id)
+            scope_owned_select(select(DecisionRecord), DecisionRecord, org_id, user_id)
             .order_by(DecisionRecord.decided_at.desc(), DecisionRecord.id.desc())
             .limit(_MAX_CONTEXT_ITEMS)
         )
@@ -524,14 +529,27 @@ class EmailDraftService:
         if connection.service != IntegrationServiceEnum.GMAIL:
             raise _conflict("A Gmail connection is required to draft email.")
 
+        # Validate references before assembling context or calling the model.
+        # Same-organization records still belong to independent workspaces.
+        for model, reference in (
+            (SourceItem, req.source_item_id),
+            (BusinessEntity, req.business_entity_id),
+        ):
+            if reference is not None:
+                stmt = scope_owned_select(select(model.id), model, org_id, user_id).where(
+                    model.id == reference
+                )
+                if self.db.execute(stmt).scalar_one_or_none() is None:
+                    raise not_found("Draft source or project not found.")
+
         thread_messages, thread_id = self._thread_messages(
             org_id, user_id, req.source_item_id
         )
         knowledge, memories = self._confirmed_knowledge(
-            org_id, req.business_entity_id
+            org_id, user_id, req.business_entity_id
         )
-        open_actions = self._open_actions(org_id, req.business_entity_id)
-        decisions = self._confirmed_decisions(org_id, req.business_entity_id)
+        open_actions = self._open_actions(org_id, user_id, req.business_entity_id)
+        decisions = self._confirmed_decisions(org_id, user_id, req.business_entity_id)
         recipients, identity = self._resolve_recipients(
             req.to_recipients, thread_messages
         )
@@ -586,7 +604,7 @@ class EmailDraftService:
         terminal or in-flight send state.
         """
 
-        draft = self._get_scoped(org_id, user_id, draft_id)
+        draft = self._get_scoped(org_id, user_id, draft_id, for_update=True)
         if draft.status in (
             EmailDraftStatus.SENDING,
             EmailDraftStatus.SENT,
@@ -604,16 +622,43 @@ class EmailDraftService:
         if edits.to_recipients is not None:
             new_recipients = _validate_recipients(edits.to_recipients)
 
-        if edits.subject is not None:
-            draft.subject = edits.subject
-        if edits.body_text is not None:
-            draft.body_text = edits.body_text
-        if edits.tone is not None:
-            draft.tone = edits.tone
-        if edits.purpose is not None:
-            draft.purpose = edits.purpose
+        changes = {
+            field: getattr(edits, field)
+            for field in ("subject", "body_text", "tone", "purpose")
+            if getattr(edits, field) is not None
+        }
         if new_recipients is not None:
-            draft.to_recipients_json = new_recipients
+            changes["to_recipients_json"] = new_recipients
+        changes = {key: value for key, value in changes.items() if getattr(draft, key) != value}
+        if not changes:
+            return draft
+
+        if draft.gmail_draft_id is not None:
+            connection = self._get_connection(org_id, draft.integration_connection_id, user_id)
+            self._require_compose_scope(connection)
+            message = GmailDraftMessage(
+                to_recipients=changes.get("to_recipients_json", list(draft.to_recipients_json or [])),
+                subject=changes.get("subject", draft.subject),
+                body_text=changes.get("body_text", draft.body_text),
+                thread_id=draft.gmail_thread_id,
+            )
+            try:
+                token = self._access_token(org_id, user_id, connection.id)
+                self.gmail.update_draft(
+                    access_token=token, draft_id=draft.gmail_draft_id, message=message,
+                )
+            except (GmailClientError, GoogleOAuthError) as exc:
+                # No send occurred. Keep local content unchanged; the next
+                # explicit send also resynchronizes it before sending.
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Could not update the Gmail draft. Check the connection and retry.",
+                ) from exc
+        for key, value in changes.items():
+            setattr(draft, key, value)
+        # Previous approval covered different content. Materialization is kept
+        # via gmail_draft_id, but the edited draft needs fresh human approval.
+        draft.status = EmailDraftStatus.AI_SUGGESTED
         self.db.add(draft)
         self.db.flush()
         return draft
@@ -627,7 +672,7 @@ class EmailDraftService:
         from the separate explicit send confirmation (Requirement 32.7).
         """
 
-        draft = self._get_scoped(org_id, user_id, draft_id)
+        draft = self._get_scoped(org_id, user_id, draft_id, for_update=True)
         if draft.status in (
             EmailDraftStatus.USER_APPROVED,
             EmailDraftStatus.GMAIL_DRAFT_CREATED,
@@ -651,7 +696,7 @@ class EmailDraftService:
         draft is in-flight or already sent.
         """
 
-        draft = self._get_scoped(org_id, user_id, draft_id)
+        draft = self._get_scoped(org_id, user_id, draft_id, for_update=True)
         if draft.status == EmailDraftStatus.REJECTED:
             return draft
         if draft.status in (EmailDraftStatus.SENDING, EmailDraftStatus.SENT):
@@ -677,7 +722,7 @@ class EmailDraftService:
         locally and instructs the user to check Gmail Drafts before proceeding.
         """
 
-        draft = self._get_scoped(org_id, user_id, draft_id)
+        draft = self._get_scoped(org_id, user_id, draft_id, for_update=True)
         if (
             draft.status == EmailDraftStatus.GMAIL_DRAFT_CREATED
             and draft.gmail_draft_id is not None
@@ -695,6 +740,21 @@ class EmailDraftService:
 
         token = self._access_token(org_id, user_id, connection.id)
         message = self._to_gmail_message(draft)
+        if draft.gmail_draft_id is not None:
+            # Re-approved edits reuse the existing provider draft, never create
+            # a second draft merely because content approval was invalidated.
+            try:
+                self.gmail.update_draft(
+                    access_token=token, draft_id=draft.gmail_draft_id, message=message,
+                )
+            except GmailClientError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Could not update the Gmail draft. Please retry.",
+                ) from exc
+            draft.status = EmailDraftStatus.GMAIL_DRAFT_CREATED
+            self.db.flush()
+            return draft
         try:
             gmail_draft_id = self.gmail.create_draft(
                 access_token=token,
@@ -740,27 +800,10 @@ class EmailDraftService:
         calls ``users.drafts.update`` so the Gmail draft reflects the change.
         """
 
-        draft = self.edit_draft(org_id, user_id, draft_id, edits)
+        draft = self._get_scoped(org_id, user_id, draft_id)
         if draft.gmail_draft_id is None:
             raise _conflict("No Gmail draft exists to update.")
-
-        connection = self._get_connection(
-            org_id, draft.integration_connection_id, user_id
-        )
-        self._require_compose_scope(connection)
-        token = self._access_token(org_id, user_id, connection.id)
-        try:
-            self.gmail.update_draft(
-                access_token=token,
-                draft_id=draft.gmail_draft_id,
-                message=self._to_gmail_message(draft),
-            )
-        except GmailClientError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Could not update the Gmail draft: {exc}",
-            ) from exc
-        return draft
+        return self.edit_draft(org_id, user_id, draft_id, edits)
 
     def send_draft(
         self,
@@ -792,7 +835,7 @@ class EmailDraftService:
                 "Sending requires a separate explicit confirmation (confirm=true)."
             )
 
-        draft = self._get_scoped(org_id, user_id, draft_id)
+        draft = self._get_scoped(org_id, user_id, draft_id, for_update=True)
 
         # Any attempt observing an in-flight or completed send returns the
         # current local state WITHOUT calling Gmail again.
@@ -833,6 +876,20 @@ class EmailDraftService:
         try:
             token = self._access_token(org_id, user_id, connection.id)
             message = self._to_gmail_message(draft)
+            if draft.gmail_draft_id is not None:
+                try:
+                    # Gmail's drafts.send uses the saved provider draft and
+                    # ignores `message`. Make it match the approved local
+                    # recipients, subject and body before allowing that call.
+                    self.gmail.update_draft(
+                        access_token=token, draft_id=draft.gmail_draft_id, message=message,
+                    )
+                except GmailClientError as exc:
+                    draft.status = prior_status
+                    self.db.flush()
+                    raise EmailDraftSendError(
+                        "The Gmail draft could not be synchronized. Nothing was sent; please retry."
+                    ) from exc
             sent_message_id = self.gmail.send_draft(
                 access_token=token,
                 message=message,

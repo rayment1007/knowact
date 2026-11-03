@@ -38,6 +38,7 @@ every row uses unique identifiers so examples never collide. Per Requirement
 
 from __future__ import annotations
 
+from tests.ownership_fixtures import only_user_id
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -127,7 +128,7 @@ def _seed_org(db: Session, content: str, name: str) -> _OrgFixture:
     db.add(source_item)
     db.flush()
 
-    knowledge = KnowledgeItem(
+    knowledge = KnowledgeItem(workspace_owner_id=only_user_id(db, org.id),
         organization_id=org.id,
         source_item_id=source_item.id,
         summary=content or "summary",
@@ -139,7 +140,7 @@ def _seed_org(db: Session, content: str, name: str) -> _OrgFixture:
     db.add(knowledge)
     db.flush()
 
-    action = ActionItem(
+    action = ActionItem(workspace_owner_id=only_user_id(db, org.id),
         organization_id=org.id,
         title=content or "Action",
         status=ActionStatus.OPEN,
@@ -182,10 +183,10 @@ def _check_isolation(
     the row's, and cross-tenant access always yields ``404``.
     """
 
-    ingestion = IngestionService(db)
-    knowledge_service = KnowledgeService(db)
-    action_service = ActionService(db)
-    decision_service = DecisionService(db)
+    ingestion = IngestionService(db, owner_id=owner.user.id)
+    knowledge_service = KnowledgeService(db, owner_id=owner.user.id)
+    action_service = ActionService(db, owner_id=owner.user.id)
+    decision_service = DecisionService(db, owner_id=owner.user.id)
 
     owner_org = owner.org.id
     other_org = other.org.id
@@ -195,7 +196,7 @@ def _check_isolation(
     _assert_cross_org_404(lambda: ingestion.get(other_org, owner.source_item.id))
     # Write (Req 2.4): cross-tenant dismiss refused; same-tenant dismiss allowed.
     _assert_cross_org_404(
-        lambda: ingestion.dismiss(other_org, owner.source_item.id, other.user.id)
+        lambda: IngestionService(db, owner_id=other.user.id).dismiss(other_org, owner.source_item.id, other.user.id)
     )
     dismissed = ingestion.dismiss(owner_org, owner.source_item.id, owner.user.id)
     assert dismissed.status == SourceStatus.DISMISSED
@@ -207,19 +208,19 @@ def _check_isolation(
         lambda: knowledge_service.get_detail(other_org, owner.knowledge.id)
     )
     _assert_cross_org_404(
-        lambda: knowledge_service.reject(other_org, owner.knowledge.id, other.user.id)
+        lambda: KnowledgeService(db, owner_id=other.user.id).reject(other_org, owner.knowledge.id, other.user.id)
     )
     rejected = knowledge_service.reject(owner_org, owner.knowledge.id, owner.user.id)
     assert rejected.status == SuggestionStatus.REJECTED
 
     # -- Action items (ActionService): write + cross-tenant delete refusal --
     _assert_cross_org_404(
-        lambda: action_service.update_status(
+        lambda: ActionService(db, owner_id=other.user.id).update_status(
             other_org, owner.action.id, other.user.id, ActionStatus.DONE
         )
     )
     _assert_cross_org_404(
-        lambda: action_service.delete(other_org, owner.action.id, other.user.id)
+        lambda: ActionService(db, owner_id=other.user.id).delete(other_org, owner.action.id, other.user.id)
     )
     updated = action_service.update_status(
         owner_org, owner.action.id, owner.user.id, ActionStatus.DONE
@@ -230,7 +231,7 @@ def _check_isolation(
 
     # -- Decision records (DecisionService): scoped list + delete refusal ---
     _assert_cross_org_404(
-        lambda: decision_service.delete(other_org, owner.decision.id, other.user.id)
+        lambda: DecisionService(db, owner_id=other.user.id).delete(other_org, owner.decision.id, other.user.id)
     )
     assert db.get(DecisionRecord, owner.decision.id) is not None
     other_visible = {row.id for row in decision_service.list(other_org)}

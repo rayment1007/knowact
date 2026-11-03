@@ -37,6 +37,7 @@ from sqlalchemy import (
     Index,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -201,11 +202,17 @@ class User(OrganizationScopedMixin, Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = _created_at()
 
+    __table_args__ = (UniqueConstraint("id", "organization_id", name="uq_users_id_org"),)
+
 
 class BusinessEntity(OrganizationScopedMixin, Base):
     """A domain object that accumulates knowledge, actions, and decisions."""
 
     __tablename__ = "business_entities"
+
+    workspace_owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True,
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     entity_type: Mapped[BusinessEntityType] = mapped_column(
@@ -220,6 +227,8 @@ class BusinessEntity(OrganizationScopedMixin, Base):
     )
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (UniqueConstraint("id", "organization_id", "workspace_owner_id", name="uq_entities_id_org_owner"),)
 
 
 class SourceItem(OrganizationScopedMixin, Base):
@@ -316,6 +325,10 @@ class KnowledgeItem(OrganizationScopedMixin, Base):
 
     __tablename__ = "knowledge_items"
 
+    workspace_owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True,
+    )
+
     id: Mapped[uuid.UUID] = _uuid_pk()
     business_entity_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("business_entities.id"), nullable=True
@@ -373,6 +386,10 @@ class ActionItem(OrganizationScopedMixin, Base):
     """A task derived from a confirmed recommendation or created manually."""
 
     __tablename__ = "action_items"
+
+    workspace_owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True,
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     business_entity_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -469,3 +486,8 @@ class AuditLog(OrganizationScopedMixin, Base):
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
     created_at: Mapped[datetime] = _created_at()
+
+
+# Register the structured-fact tables for metadata/create_all without making
+# legacy KnowledgeItem rows implicit members of versioned fact memory.
+from app.core import fact_models as _fact_models  # noqa: E402,F401
