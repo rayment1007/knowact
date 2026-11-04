@@ -85,6 +85,10 @@ export function getErrorMessage(
     if (typeof detail === "string" && detail.trim() !== "") {
       return detail;
     }
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      const message = (detail as { message?: unknown }).message;
+      if (typeof message === "string" && message.trim() && message.length <= 1000) return message.trim();
+    }
     if (Array.isArray(detail)) {
       return "Please correct the highlighted fields and try again.";
     }

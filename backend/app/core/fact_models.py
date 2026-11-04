@@ -160,6 +160,8 @@ class FactProposal(OrganizationScopedMixin, Base):
     evidence_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     value_json: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    extraction_context: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    comparison_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     relationship: Mapped[str] = mapped_column(String(16), nullable=False, default="UNCLEAR", server_default="UNCLEAR")
     comparison_ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     expected_head_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
@@ -174,12 +176,64 @@ class FactProposal(OrganizationScopedMixin, Base):
         _version_fk("expected_head_id", "fk_fact_proposal_head"),
         _version_fk("result_version_id", "fk_fact_proposal_result"),
         _scope_unique("uq_fact_proposal_scope", "identity_id"),
+        _scope_unique("uq_fact_proposal_owner_scope"),
         CheckConstraint("revision > 0", name="ck_fact_proposal_revision"),
         CheckConstraint("status IN ('PENDING','APPROVED','REJECTED','UNRESOLVED')", name="ck_fact_proposal_status"),
         CheckConstraint("relationship IN ('NEW','SAME','REVISION','CONFLICT','UNCLEAR')", name="ck_fact_proposal_relationship"),
         CheckConstraint("(redacted_at IS NULL AND value_json IS NOT NULL) OR (redacted_at IS NOT NULL AND value_json IS NULL)", name="ck_fact_proposal_redaction"),
         CheckConstraint("(status = 'APPROVED' AND result_version_id IS NOT NULL) OR (status <> 'APPROVED' AND result_version_id IS NULL)", name="ck_fact_proposal_result"),
         Index("ix_fact_proposal_review_queue", "organization_id", "workspace_owner_id", "status"),
+    )
+
+
+class FactResolution(OrganizationScopedMixin, Base):
+    """Content-free, immutable lineage from a candidate to a verified identity.
+
+    A rematch appends a new resolution and deactivates the previous link. The
+    original proposal's identity and existing review history never change.
+    """
+    __tablename__ = "fact_resolutions"
+    id: Mapped[uuid.UUID] = _id()
+    workspace_owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    candidate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    candidate_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    resolved_proposal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    request_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    created_at: Mapped[datetime] = _created()
+    __table_args__ = (
+        _owner_fk("fk_fact_resolution_owner"),
+        ForeignKeyConstraint(["candidate_id", "organization_id", "workspace_owner_id"],
+            ["fact_proposals.id", "fact_proposals.organization_id", "fact_proposals.workspace_owner_id"], name="fk_fact_resolution_candidate"),
+        ForeignKeyConstraint(["resolved_proposal_id", "organization_id", "workspace_owner_id"],
+            ["fact_proposals.id", "fact_proposals.organization_id", "fact_proposals.workspace_owner_id"], name="fk_fact_resolution_proposal"),
+        UniqueConstraint("organization_id", "workspace_owner_id", "request_key", name="uq_fact_resolution_request"),
+        UniqueConstraint("resolved_proposal_id", name="uq_fact_resolution_proposal"),
+        Index("uq_fact_resolution_active", "candidate_id", unique=True,
+            postgresql_where=text("active = true"), sqlite_where=text("active = true")),
+        CheckConstraint("candidate_revision > 0 AND candidate_id <> resolved_proposal_id", name="ck_fact_resolution_candidate"),
+        CheckConstraint("length(request_key) > 0 AND length(request_hash) = 64", name="ck_fact_resolution_request"),
+    )
+
+
+class FactComparisonRequest(OrganizationScopedMixin, Base):
+    """Content-free replay guard for a server-generated comparison."""
+    __tablename__ = "fact_comparison_requests"
+    id: Mapped[uuid.UUID] = _id()
+    workspace_owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    proposal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    proposal_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = _created()
+    __table_args__ = (
+        _owner_fk("fk_fact_comparison_owner"),
+        ForeignKeyConstraint(["proposal_id", "organization_id", "workspace_owner_id"],
+            ["fact_proposals.id", "fact_proposals.organization_id", "fact_proposals.workspace_owner_id"], name="fk_fact_comparison_proposal"),
+        UniqueConstraint("organization_id", "workspace_owner_id", "request_key", name="uq_fact_comparison_request"),
+        CheckConstraint("proposal_revision > 0", name="ck_fact_comparison_revision"),
+        CheckConstraint("length(request_key) > 0 AND length(request_hash) = 64", name="ck_fact_comparison_request"),
     )
 
 
@@ -224,6 +278,32 @@ class FactReview(OrganizationScopedMixin, Base):
         CheckConstraint("decision IN ('EDIT','APPROVE','REJECT','KEEP_UNRESOLVED')", name="ck_fact_review_decision"),
         CheckConstraint("length(request_key) > 0 AND length(request_hash) = 64", name="ck_fact_review_request"),
     )
+
+
+_RESOLUTION_GUARD_PG = """
+CREATE OR REPLACE FUNCTION knowact_guard_fact_resolution() RETURNS trigger AS $$
+BEGIN
+ IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'Fact resolution history cannot be deleted'; END IF;
+ IF (to_jsonb(NEW) - 'active') IS DISTINCT FROM (to_jsonb(OLD) - 'active')
+    OR (OLD.active = false AND NEW.active = true) THEN
+   RAISE EXCEPTION 'Fact resolution lineage is immutable';
+ END IF;
+ RETURN NEW;
+END; $$ LANGUAGE plpgsql
+"""
+_RESOLUTION_GUARD_SQLITE = """
+CREATE TRIGGER guard_fact_resolution_update BEFORE UPDATE ON fact_resolutions
+WHEN NEW.id IS NOT OLD.id OR NEW.organization_id IS NOT OLD.organization_id
+ OR NEW.workspace_owner_id IS NOT OLD.workspace_owner_id OR NEW.candidate_id IS NOT OLD.candidate_id
+ OR NEW.candidate_revision IS NOT OLD.candidate_revision OR NEW.resolved_proposal_id IS NOT OLD.resolved_proposal_id
+ OR NEW.request_key IS NOT OLD.request_key OR NEW.request_hash IS NOT OLD.request_hash
+ OR NEW.created_at IS NOT OLD.created_at OR (OLD.active = false AND NEW.active = true)
+BEGIN SELECT RAISE(ABORT, 'Fact resolution lineage is immutable'); END
+"""
+event.listen(FactResolution.__table__, "after_create", DDL(_RESOLUTION_GUARD_PG).execute_if(dialect="postgresql"))
+event.listen(FactResolution.__table__, "after_create", DDL("CREATE TRIGGER guard_fact_resolution BEFORE UPDATE OR DELETE ON fact_resolutions FOR EACH ROW EXECUTE FUNCTION knowact_guard_fact_resolution()").execute_if(dialect="postgresql"))
+event.listen(FactResolution.__table__, "after_create", DDL(_RESOLUTION_GUARD_SQLITE).execute_if(dialect="sqlite"))
+event.listen(FactResolution.__table__, "after_create", DDL("CREATE TRIGGER guard_fact_resolution_delete BEFORE DELETE ON fact_resolutions BEGIN SELECT RAISE(ABORT, 'Fact resolution history cannot be deleted'); END").execute_if(dialect="sqlite"))
 
 
 # Identity keys are immutable: changing a project's key below an accepted

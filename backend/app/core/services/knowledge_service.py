@@ -323,7 +323,10 @@ class KnowledgeService(PersonalScope):
             summary=output.summary,
             key_points=list(output.key_points),
             evidence_text=evidence_text,
-            knowledge_type=output.knowledge_type,
+            # This legacy endpoint saves a narrative summary, not an atomic
+            # assertion in versioned memory. Model labels cannot bypass the
+            # separate identity/comparison/human-review workflow.
+            knowledge_type="CONTEXT",
             status=SuggestionStatus.SUGGESTED,
         )
         self.db.add(knowledge)
@@ -372,6 +375,8 @@ class KnowledgeService(PersonalScope):
             raise HTTPException(status_code=409, detail="Only a pending suggestion can be approved.")
         if not (knowledge.evidence_text or "").strip():
             raise HTTPException(status_code=409, detail="Evidence is required before approval.")
+        previous_type = knowledge.knowledge_type
+        knowledge.knowledge_type = "CONTEXT"
         knowledge.status = SuggestionStatus.CONFIRMED
         self.db.add(knowledge)
 
@@ -383,7 +388,8 @@ class KnowledgeService(PersonalScope):
             target_type="KnowledgeItem",
             target_id=knowledge.id,
             detail={"business_entity_id": str(knowledge.business_entity_id)
-                    if knowledge.business_entity_id is not None else None},
+                    if knowledge.business_entity_id is not None else None,
+                    "knowledge_scope": "GENERAL_CONTEXT", "previous_type": previous_type},
         )
 
         self.db.flush()

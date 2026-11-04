@@ -89,7 +89,8 @@ def fact_service_pg():
     schema = "phase2_" + uuid4().hex
     assert re.fullmatch(r"phase2_[0-9a-f]{32}", schema)
     tables = FACT_TABLES | {"organizations", "users", "business_entities", "source_items",
-        "classification_results", "audit_logs", "integration_connections", "email_message_records"}
+        "classification_results", "audit_logs", "integration_connections", "email_message_records",
+        "fact_resolutions", "fact_comparison_requests", "fact_extraction_runs", "fact_extraction_requests"}
     try:
         with engine.begin() as connection:
             connection.execute(sa.text(f'CREATE SCHEMA "{schema}"'))

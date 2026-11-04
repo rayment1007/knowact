@@ -45,7 +45,7 @@ export default function EnterpriseDashboardPage() {
   const today = localDay(now);
   const overdue = openActions.filter(item => item.due_date && item.due_date < today).length;
   const dueToday = openActions.filter(item => item.due_date === today).length;
-  const reviews = (summary?.source_reviews ?? 0) + (summary?.knowledge_reviews ?? 0) + (summary?.action_reviews ?? 0) + (summary?.draft_reviews ?? 0);
+  const reviews = (summary?.source_reviews ?? 0) + (summary?.knowledge_reviews ?? 0) + (summary?.action_reviews ?? 0) + (summary?.draft_reviews ?? 0) + (summary?.fact_reviews ?? 0);
   const briefReady = !!summary && !!actions.data && !!calendar.data;
   const briefError = (!summary && !!statusError) || (!actions.data && actions.error) || (!calendar.data && calendar.error);
   const briefStale = !!statusError || actions.error || calendar.error;
@@ -74,6 +74,7 @@ export default function EnterpriseDashboardPage() {
           {openActions[0] && <li><Link className="hover:text-blue-700" to={`/actions/${openActions[0].id}`}>→ {openActions[0].title}</Link></li>}
           {!!summary?.source_reviews && <li><Link className="hover:text-blue-700" to="/source-inbox?review=1">→ Review {unit(summary.source_reviews, "source suggestion")}</Link></li>}
           {!!summary?.knowledge_reviews && <li><Link className="hover:text-blue-700" to="/knowledge?status=SUGGESTED">→ Review {unit(summary.knowledge_reviews, "knowledge suggestion")}</Link></li>}
+          {!!summary?.fact_reviews && <li><Link className="hover:text-blue-700" to="/workspace/knowledge?memory=needs_review">→ Review {unit(summary.fact_reviews, "project fact")}{summary.fact_unresolved ? ` · ${summary.fact_unresolved} unresolved` : ""}</Link></li>}
           {!!summary?.action_reviews && <li><Link className="hover:text-blue-700" to="/workspace/actions?status=SUGGESTED">→ Review {unit(summary.action_reviews, "action suggestion")}</Link></li>}
           {events[0] && <li><Link className="hover:text-blue-700" to={`/calendar-sources/${events[0].id}`}>→ {events[0].title}</Link></li>}
           {quiet && <li>{syncFailed ? "Retry Sync Now to check your connected sources." : syncing ? "Checking your connected sources…" : "Room to think. Or finally finish that coffee."}</li>}
@@ -81,6 +82,7 @@ export default function EnterpriseDashboardPage() {
       </div>}
     </section>
 
+    {!!summary?.fact_unresolved && <Link to="/workspace/knowledge?memory=needs_review" className="mb-5 block rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">{unit(summary.fact_unresolved, "project fact")} needs a decision. Conflicting or unclear proposals have not replaced the current values. Review facts →</Link>}
     <div className="mb-6 grid grid-cols-2 gap-3 xl:grid-cols-4">{([
       ["Needs review", summary ? reviews : undefined, "/reviews", "file", "Sources, knowledge, actions and email drafts"],
       ["Today’s to-do", actions.data ? dueToday : undefined, `/workspace/actions?due=${today}`, "check", "Open actions due today"],

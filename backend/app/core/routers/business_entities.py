@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.core.models import BusinessEntity, User, KnowledgeItem, ActionItem, DecisionRecord, Brief
 from app.core.fact_models import FactIdentity
+from app.core.fact_extraction_models import FactExtractionRun
 from app.modules.cwi.models import EmailTaskSuggestion, EmailDraft
 from app.core.services.audit_service import AuditService
 from app.core.ownership import scope_owned_select
@@ -126,6 +127,12 @@ def delete_business_entity(entity_id: UUID, db: Session = Depends(get_db), user:
         FactIdentity.project_id == entity_id,
     ).limit(1)) is not None:
         raise HTTPException(409, "This project has fact history and cannot be deleted.")
+    if db.scalar(select(FactExtractionRun.id).where(
+        FactExtractionRun.organization_id == user.organization_id,
+        FactExtractionRun.workspace_owner_id == user.id,
+        FactExtractionRun.project_id == entity_id,
+    ).limit(1)) is not None:
+        raise HTTPException(409, "This project has extraction history and cannot be deleted.")
     for model in (KnowledgeItem, ActionItem, DecisionRecord, EmailTaskSuggestion, EmailDraft):
         db.execute(update(model).where(model.organization_id == user.organization_id,
             model.business_entity_id == entity_id).values(business_entity_id=None))

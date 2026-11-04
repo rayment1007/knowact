@@ -1,4 +1,4 @@
-"""Controlled Phase 2 review API; no extraction or client-supplied comparison.
+"""Controlled fact review API; no client-supplied relationship classification.
 
 This router is development-only. General Knowledge continues through its
 existing routes. Every fact read, including history and evidence, is personal.
@@ -17,6 +17,7 @@ from app.core.fact_models import (
     FactSourceSnapshot, FactVersion,
 )
 from app.core.models import User
+from app.core.services import fact_memory_views as views
 from app.database import get_db
 from app.dependencies import get_current_user
 
@@ -46,6 +47,26 @@ class ReviewRequest(BaseModel):
     expected_source_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     decision: Literal["APPROVE", "REJECT", "KEEP_UNRESOLVED"]
     request_key: str = Field(min_length=1, max_length=128)
+    resolution_reason: str | None = Field(default=None, min_length=1, max_length=2000)
+
+
+class ResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+    expected_source_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    project_id: UUID
+    identity_id: UUID | None = None
+    canonical_key: str | None = Field(default=None, min_length=1, max_length=160)
+    occurrence_key: str = Field(default="", max_length=160)
+    request_key: str = Field(min_length=1, max_length=128)
+
+
+class CompareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+    expected_head_id: UUID | None
+    expected_source_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    request_key: str = Field(min_length=1, max_length=128)
 
 
 def _scope(model, user):
@@ -65,7 +86,7 @@ def _fields(row, names):
 
 
 def _proposal(row):
-    return _fields(row, "id identity_id evidence_id revision value_json relationship comparison_ready expected_head_id status result_version_id redacted_at created_at updated_at")
+    return views.proposal(row)
 
 
 def _version(row):
@@ -86,6 +107,29 @@ def _evidence(db, user, evidence_id):
     }
 
 
+@router.get("/counts")
+def counts(project_id: UUID | None = None, db: Session = Depends(get_db),
+           user: User = Depends(get_current_user)):
+    return views.counts(db, user, project_id)
+
+
+@router.get("/memory")
+def memory(view: Literal["needs_review", "current", "history"] = "needs_review",
+           relationship: Literal["NEW", "SAME", "REVISION", "CONFLICT", "UNCLEAR"] | None = None,
+           project_id: UUID | None = None, q: str | None = Query(None, max_length=200),
+           limit: int = Query(25, ge=1, le=100), offset: int = Query(0, ge=0),
+           db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return views.memory_page(db, user, view=view, relationship=relationship,
+        project_id=project_id, q=q, limit=limit, offset=offset)
+
+
+@router.get("/identities")
+def identities(project_id: UUID, q: str | None = Query(None, max_length=200),
+               limit: int = Query(25, ge=1, le=100), offset: int = Query(0, ge=0),
+               db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return views.identity_page(db, user, project_id=project_id, q=q, limit=limit, offset=offset)
+
+
 @router.get("/proposals")
 def list_proposals(status: Literal["PENDING", "APPROVED", "REJECTED", "UNRESOLVED"] | None = None,
                    limit: int = Query(25, ge=1, le=100), offset: int = Query(0, ge=0),
@@ -101,14 +145,7 @@ def list_proposals(status: Literal["PENDING", "APPROVED", "REJECTED", "UNRESOLVE
 
 @router.get("/proposals/{proposal_id}")
 def proposal_detail(proposal_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    row = _owned(db, user, FactProposal, proposal_id)
-    identity = _owned(db, user, FactIdentity, row.identity_id)
-    head = db.scalar(select(FactVersion).where(*_scope(FactVersion, user),
-        FactVersion.identity_id == identity.id, FactVersion.status == "CURRENT"))
-    return {"proposal": _proposal(row),
-        "identity": _fields(identity, "id project_id fact_type canonical_key occurrence_key"),
-        "current": _version(head) if head else None,
-        "evidence": _evidence(db, user, row.evidence_id)}
+    return views.proposal_detail(db, user, proposal_id)
 
 
 @router.get("/identities/{identity_id}/current")
@@ -127,18 +164,29 @@ def history(identity_id: UUID, limit: int = Query(25, ge=1, le=100), offset: int
     total = db.scalar(select(func.count()).select_from(FactVersion).where(*filters))
     versions = db.scalars(select(FactVersion).where(*filters)
         .order_by(FactVersion.version_number.desc()).limit(limit).offset(offset)).all()
-    return {"items": [_version(row) for row in versions], "total": total, "limit": limit, "offset": offset}
+    return {"items": [views.version(row, user.full_name) for row in versions], "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/versions/{version_id}")
+def version_detail(version_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return views.version_detail(db, user, version_id)
 
 
 @router.get("/versions/{version_id}/evidence")
 def version_evidence(version_id: UUID, limit: int = Query(25, ge=1, le=100), offset: int = Query(0, ge=0),
                      db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return views.version_evidence(db, user, version_id, limit=limit, offset=offset)
+
+
+@router.get("/versions/{version_id}/reviews")
+def version_reviews(version_id: UUID, limit: int = Query(25, ge=1, le=100), offset: int = Query(0, ge=0),
+                    db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     _owned(db, user, FactVersion, version_id)
-    filters = [*_scope(FactEvidenceLink, user), FactEvidenceLink.version_id == version_id]
-    total = db.scalar(select(func.count()).select_from(FactEvidenceLink).where(*filters))
-    links = db.scalars(select(FactEvidenceLink).where(*filters)
-        .order_by(FactEvidenceLink.created_at, FactEvidenceLink.id).limit(limit).offset(offset)).all()
-    return {"items": [_evidence(db, user, link.evidence_id) for link in links],
+    filters = [*_scope(FactReview, user), FactReview.result_version_id == version_id]
+    total = db.scalar(select(func.count()).select_from(FactReview).where(*filters)) or 0
+    rows = db.scalars(select(FactReview).where(*filters).order_by(FactReview.created_at, FactReview.id)
+        .limit(limit).offset(offset)).all()
+    return {"items": [views.review(row, user.full_name) for row in rows],
             "total": total, "limit": limit, "offset": offset}
 
 
@@ -150,7 +198,7 @@ def reviews(proposal_id: UUID, limit: int = Query(25, ge=1, le=100), offset: int
     total = db.scalar(select(func.count()).select_from(FactReview).where(*filters))
     rows = db.scalars(select(FactReview).where(*filters)
         .order_by(FactReview.created_at, FactReview.id).limit(limit).offset(offset)).all()
-    return {"items": [_review(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+    return {"items": [views.review(row, user.full_name) for row in rows], "total": total, "limit": limit, "offset": offset}
 
 
 @router.patch("/proposals/{proposal_id}")
@@ -159,6 +207,24 @@ def edit(proposal_id: UUID, body: EditRequest,
     from app.core.services.fact_memory_service import FactMemoryService
     return _review(FactMemoryService(db, owner_id=user.id, org_id=user.organization_id)
         .edit(proposal_id=proposal_id, **body.model_dump()))
+
+
+@router.post("/proposals/{candidate_id}/resolve")
+def resolve(candidate_id: UUID, body: ResolveRequest,
+            db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from app.core.services.fact_resolution_service import FactResolutionService
+    result = FactResolutionService(db, owner_id=user.id, org_id=user.organization_id).resolve(
+        candidate_id=candidate_id, **body.model_dump())
+    return views.proposal_detail(db, user, result.id)
+
+
+@router.post("/proposals/{proposal_id}/compare")
+def compare(proposal_id: UUID, body: CompareRequest,
+            db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from app.core.services.fact_resolution_service import FactResolutionService
+    result = FactResolutionService(db, owner_id=user.id, org_id=user.organization_id).compare(
+        proposal_id=proposal_id, **body.model_dump())
+    return views.proposal_detail(db, user, result.id)
 
 
 @router.post("/proposals/{proposal_id}/review")

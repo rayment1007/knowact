@@ -155,13 +155,24 @@ def update(db, user, row, version, payload, approve=False):
     if row.status != "SUGGESTED" or row.version != version:
         raise HTTPException(409, "This draft has changed. Reopen it to review the latest version.")
     values = clean_payload(row.target, payload)
+    from app.core.services.fact_extraction_service import for_summary
+    extraction = for_summary(db, user, row.id) if row.target == "knowledge" else None
     if approve:
-        _, _, fingerprint, _, source = snapshot(db, user, row.source_kind, row.source_id, row.sensitivity_acknowledged, lock=True)
+        if extraction is not None:
+            from app.core.services.fact_sources import read_fact_source
+            fresh = read_fact_source(db, user, row.source_kind, row.source_id, lock=True,
+                acknowledge_sensitive=row.sensitivity_acknowledged)
+            fingerprint, source = fresh.fingerprint, fresh.source
+            if extraction.redacted_at:
+                raise HTTPException(409, "This draft's source-derived content was deleted.")
+        else:
+            _, _, fingerprint, _, source = snapshot(db, user, row.source_kind, row.source_id, row.sensitivity_acknowledged, lock=True)
         if fingerprint != row.source_fingerprint:
             raise HTTPException(409, "The original source changed. Discard this draft and generate a new one before approving.")
         if row.target == "knowledge":
             result = KnowledgeItem(organization_id=user.organization_id, workspace_owner_id=user.id, source_item_id=source.id if source else None,
                 summary=values["summary"], key_points=values["key_points"], evidence_text=row.evidence_text,
+                business_entity_id=extraction.project_id if extraction else None,
                 knowledge_type="CONTEXT", status="CONFIRMED")
         else:
             result = ActionItem(organization_id=user.organization_id, workspace_owner_id=user.id, owner_id=user.id,

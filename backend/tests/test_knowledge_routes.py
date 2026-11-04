@@ -188,6 +188,26 @@ def test_reject_sets_rejected(
     assert resp.json()["status"] == "REJECTED"
 
 
+def test_legacy_fact_label_approval_is_general_context_not_atomic_memory(
+    client: TestClient, seeded_user: dict[str, Any], db_session: Session
+) -> None:
+    from app.core.fact_models import FactVersion, FactReview
+    from sqlalchemy import func, select
+    from app.core.models import KnowledgeItem
+    _login(client, seeded_user["email"], seeded_user["password"])
+    knowledge = _extract_knowledge(client, db_session)
+    row = db_session.get(KnowledgeItem, UUID(knowledge["id"]))
+    row.knowledge_type = "FACT"  # A pending summary saved before Phase 4.
+    db_session.flush()
+    response = client.post(f"/api/knowledge/{row.id}/confirm")
+    assert response.status_code == 200, response.text
+    assert response.json()["knowledge_type"] == "CONTEXT"
+    assert db_session.scalar(select(func.count()).select_from(FactVersion)) == 0
+    assert db_session.scalar(select(func.count()).select_from(FactReview)) == 0
+    again = client.post(f"/api/knowledge/{row.id}/confirm")
+    assert again.status_code == 200 and again.json()["knowledge_type"] == "CONTEXT"
+
+
 # ---------------------------------------------------------------------------
 # List (GET /api/knowledge) with filters
 # ---------------------------------------------------------------------------

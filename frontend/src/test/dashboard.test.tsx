@@ -5,7 +5,7 @@ import EnterpriseDashboardPage from "@/pages/EnterpriseDashboardPage";
 import { api } from "@/api/client";
 
 const workspace = vi.hoisted(() => ({
-  summary: { documents: 2, notes: 1, open_actions: 1, knowledge: 3, source_reviews: 2, knowledge_reviews: 1 },
+  summary: { documents: 2, notes: 1, open_actions: 1, knowledge: 3, source_reviews: 2, knowledge_reviews: 1, fact_reviews: 0, fact_unresolved: 0 },
   connections: [{ id: "mail", service: "GMAIL", status: "CONNECTED", last_error: null }],
   loading: false, syncing: false, error: null as string | null, failures: {} as Record<string, string>,
 }));
@@ -22,6 +22,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date(2026, 8, 28, 13, 21, 34));
   calls = []; failActions = false;
   workspace.error = null; workspace.failures = {}; workspace.summary.source_reviews = 2; workspace.summary.knowledge_reviews = 1;
+  workspace.summary.fact_reviews = 0; workspace.summary.fact_unresolved = 0;
   actions = [{ id: "one", title: "Finish checklist", due_date: "2026-09-28", status: "OPEN", created_at: "2026-09-01T00:00:00Z" }];
   vi.stubGlobal("fetch", vi.fn(async (url: string, options: RequestInit) => {
     calls.push(`${options.method} ${url}`);
@@ -36,6 +37,15 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("dashboard brief and review entry points", () => {
+  it("counts project facts once and links unresolved reviews to the fact workspace", async () => {
+    actions = []; workspace.summary.fact_reviews = 2; workspace.summary.fact_unresolved = 1;
+    render(<MemoryRouter><EnterpriseDashboardPage /></MemoryRouter>);
+    expect(await screen.findByText("5 suggestions ready for your review.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Review 2 project facts/ })).toHaveAttribute("href", "/workspace/knowledge?memory=needs_review");
+    expect(screen.getByRole("link", { name: /1 project fact needs a decision/ })).toHaveAttribute("href", "/workspace/knowledge?memory=needs_review");
+    expect(calls.some(call => call.includes("sync"))).toBe(false);
+  });
+
   it("shows the local date, true due-work summary and exact review filters", async () => {
     render(<MemoryRouter><EnterpriseDashboardPage /></MemoryRouter>);
     expect(await screen.findByText("1 action due today.")).toBeInTheDocument();

@@ -12,7 +12,7 @@ export const cacheKey = (path: string) => {
   params.sort();
   return base + (params.size ? `?${params}` : "");
 };
-export const canCache = (path: string) => /^\/(workspace|source-items|knowledge|actions|documents|gmail|email-drafts|business-entities|integrations|privacy|calendar)(\/|\?|$)/.test(path)
+export const canCache = (path: string) => /^\/(dev\/fact-memory|workspace|source-items|knowledge|actions|documents|gmail|email-drafts|business-entities|integrations|privacy|calendar)(\/|\?|$)/.test(path)
   && !/\/(callback|connect|authorize|calendars)(\?|$)/.test(path);
 
 export function peekCache<T>(path: string): T | undefined {
@@ -100,8 +100,9 @@ export function invalidateApiCache(prefixes: string[], revalidate = true) {
 export function mutationDependencies(path: string, method = "POST"): string[] {
   const root = path.split("/")[1];
   const workspace = ["/workspace/summary", "/workspace/search", "/workspace/activity", "/workspace/items", "/workspace/counts", "/workspace/source", "/workspace/proposals", "/workspace/knowledge"];
+  if (path.startsWith("/dev/fact-memory/")) return ["/dev/fact-memory", ...workspace];
   const dependencies: Record<string, string[]> = {
-    workspace: ["/workspace/sync-preferences", "/workspace/sync-exclusions", "/workspace/proposals", "/workspace/knowledge", "/workspace/actions", "/knowledge", "/actions"],
+    workspace: ["/workspace/sync-preferences", "/workspace/sync-exclusions", "/workspace/proposals", "/workspace/knowledge", "/workspace/actions", "/knowledge", "/actions", "/dev/fact-memory"],
     actions: ["/actions", "/knowledge", "/workspace/actions", ...(path.endsWith("/add-to-calendar") ? ["/workspace/calendar", "/calendar"] : method === "DELETE" ? ["/calendar"] : [])],
     knowledge: ["/knowledge", "/source-items", ...(method === "DELETE" ? ["/actions"] : [])],
     "source-items": ["/source-items", ...(method === "DELETE" ? ["/knowledge", "/gmail", "/email-drafts", "/workspace/actions"] : path.endsWith("/extract") ? ["/knowledge"] : [])],
@@ -112,9 +113,10 @@ export function mutationDependencies(path: string, method = "POST"): string[] {
     "email-drafts": ["/email-drafts", "/gmail", "/source-items"],
     privacy: ["/privacy", "/integrations", "/gmail", "/documents", "/source-items", "/knowledge", "/email-drafts", "/workspace/files", "/workspace/suggestions", "/workspace/actions"],
     copilot: ["/source-items", "/knowledge", "/actions", "/email-drafts"],
-    "business-entities": ["/business-entities", "/actions", "/knowledge"],
+    "business-entities": ["/business-entities", "/actions", "/knowledge", "/dev/fact-memory"],
   };
   if (root === "integrations") return dependencies[root];
   if (root === "copilot" && !path.endsWith("/confirm")) return [];
-  return dependencies[root] ? [...dependencies[root], ...workspace] : [];
+  const sourceDependencies = ["source-items", "documents", "gmail", "calendar", "privacy"].includes(root) ? ["/dev/fact-memory"] : [];
+  return dependencies[root] ? [...dependencies[root], ...workspace, ...sourceDependencies] : [];
 }

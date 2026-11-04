@@ -18,8 +18,9 @@ from sqlalchemy.orm import Session
 
 from app.core.fact_models import (
     FactEvidence, FactEvidenceLink, FactIdentity, FactProposal, FactReview,
-    FactSourceSnapshot, FactVersion,
+    FactSourceSnapshot, FactVersion, FactResolution,
 )
+from app.core.fact_extraction_models import FactExtractionRun
 
 
 def lock_fact_origin(db: Session, *, org_id: UUID, owner_id: UUID, origin_key: str) -> None:
@@ -112,6 +113,9 @@ def purge_fact_origin(
         proposals = list(db.scalars(scoped(FactProposal).where(
             FactProposal.evidence_id.in_(evidence_ids)).with_for_update()
             .execution_options(populate_existing=True)))
+        extraction_runs = list(db.scalars(scoped(FactExtractionRun).where(
+            FactExtractionRun.origin_key == origin_key).with_for_update()
+            .execution_options(populate_existing=True)))
         affected_version_ids = set(db.scalars(select(FactEvidenceLink.version_id).where(
             FactEvidenceLink.organization_id == org_id, FactEvidenceLink.workspace_owner_id == owner_id,
             FactEvidenceLink.evidence_id.in_(evidence_ids))))
@@ -153,7 +157,17 @@ def purge_fact_origin(
             if row.redacted_at is None:
                 counts[2] += 1
                 row.value_json, row.redacted_at = None, now
+                row.extraction_context = {}
+                row.comparison_json = {}
                 row.comparison_ready = False
+        if proposal_ids:
+            db.execute(update(FactResolution).where(
+                FactResolution.organization_id == org_id, FactResolution.workspace_owner_id == owner_id,
+                FactResolution.candidate_id.in_(proposal_ids) | FactResolution.resolved_proposal_id.in_(proposal_ids),
+            ).values(active=False))
+        for row in extraction_runs:
+            if row.redacted_at is None:
+                row.output_json, row.coverage_json, row.redacted_at = None, {}, now
         for row in versions:
             if row.redacted_at is None:
                 counts[3] += 1

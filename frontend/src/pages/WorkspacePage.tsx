@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, Navigate, useLocation, useParams, useSearchParams } from "react-router-dom";
 import { browserApi, type ItemKind, type SourceKind, type WorkspaceSection } from "@/api/workspaceBrowser";
 import { useCachedQuery } from "@/hooks/useCachedQuery";
@@ -7,6 +7,7 @@ import { ErrorState, LoadingState } from "@/components/feedback";
 import AddSourceDialog from "@/components/workspace/AddSourceDialog";
 import ProposalDetail from "@/components/workspace/SourceProposal";
 import ManageProjects from "@/components/workspace/ManageProjects";
+import FactWorkspace from "@/components/workspace/FactWorkspace";
 import SourceDetail from "@/components/workspace/SourceDetail";
 import ActionDetail, { AddActionDialog, SuggestionDetail } from "@/components/workspace/ActionDetail";
 import { KnowledgeDetailPanel } from "@/pages/KnowledgeHubPage";
@@ -23,6 +24,23 @@ const statuses: Record<WorkspaceSection, string[]> = {
   actions: ["SUGGESTED", "OPEN", "IN_PROGRESS", "DONE", "CANCELLED"],
 };
 const noChange = () => {};
+
+function KnowledgeModes({ children }: { children: ReactNode }) {
+  const [params] = useSearchParams();
+  const capabilities = useCachedQuery("/workspace/fact-extraction/capabilities", browserApi.factCapabilities);
+  const facts = params.has("memory");
+  return <>
+    {capabilities.data?.enabled && <nav aria-label="Knowledge views" className="mb-4 flex gap-2">
+      <Link className={`rounded-lg px-4 py-2 text-sm ${!facts ? "bg-blue-50 font-semibold text-blue-700" : "text-slate-600 hover:bg-slate-100"}`} aria-current={!facts ? "page" : undefined} to="/workspace/knowledge">General knowledge</Link>
+      <Link className={`rounded-lg px-4 py-2 text-sm ${facts ? "bg-blue-50 font-semibold text-blue-700" : "text-slate-600 hover:bg-slate-100"}`} aria-current={facts ? "page" : undefined} to="/workspace/knowledge?memory=needs_review">Project facts</Link>
+    </nav>}
+    {facts ? capabilities.error ? <ErrorState message="Could not check project fact availability." onRetry={capabilities.retry} /> : !capabilities.data ? <LoadingState label="Loading project facts…" /> : capabilities.data.enabled ? <FactWorkspace /> : <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600">Project facts are not available in this workspace yet. <Link className="text-blue-700 underline" to="/workspace/knowledge">Open general knowledge</Link></p> : children}
+  </>;
+}
+
+function KnowledgeContainer({ section, children }: { section: WorkspaceSection; children: ReactNode }) {
+  return section === "knowledge" ? <KnowledgeModes>{children}</KnowledgeModes> : <>{children}</>;
+}
 
 export default function WorkspacePage() {
   const { section: routeSection } = useParams<{ section: string }>();
@@ -75,11 +93,11 @@ export default function WorkspacePage() {
       </div>
     </header>
     <nav aria-label="Workspace sections" className="mb-5 flex gap-2 border-b border-slate-200">{sections.map(([key, label]) => {
-      const pending = counts.data?.[`${key}_reviews`] ?? 0;
+      const pending = (counts.data?.[`${key}_reviews`] ?? 0) + (key === "knowledge" ? counts.data?.fact_reviews ?? 0 : 0);
       return <Link key={key} to={`/workspace/${key}`} aria-current={section === key ? "page" : undefined} className={`flex items-center gap-2 border-b-2 px-3 py-3 text-sm font-semibold sm:px-5 ${section === key ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-800"}`}>{label}{pending > 0 && <span title={`${pending} pending ${key === "sources" ? "classification" : key === "actions" ? "action suggestion" : "knowledge"} reviews`} aria-label={`${pending} pending reviews`} className="rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700">{pending}</span>}</Link>;
     })}</nav>
     {counts.error && <p role="status" className="mb-3 text-xs text-amber-700">Review counts could not be refreshed. <button className="underline" onClick={counts.retry}>Retry</button></p>}
-    <div className="grid items-start gap-4 xl:grid-cols-[11rem_minmax(0,1fr)]">
+    <KnowledgeContainer section={section}><div className="grid items-start gap-4 xl:grid-cols-[11rem_minmax(0,1fr)]">
       <aside aria-label={`${section === "sources" ? "Source" : section === "knowledge" ? "Knowledge" : "Action"} filters`} className="space-y-4 rounded-xl border border-slate-200 bg-white p-3">
         {section === "sources" && <div className="flex flex-wrap gap-1 xl:block">{types.map(([value, label, icon]) => <button key={value} aria-pressed={sourceType === value} onClick={() => changeFilter({ type: value === "all" ? null : value })} className={`flex items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs font-medium xl:w-full ${sourceType === value ? "bg-blue-50 text-blue-700" : "text-slate-600 hover:bg-slate-50"}`}><WorkspaceIcon name={icon} className="h-4 w-4" /><span>{label}</span><span className="ml-auto rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">{query.data ? value === "all" ? Object.values(query.data.type_counts).reduce((sum, count) => sum + count, 0) : query.data.type_counts[value] ?? 0 : "?"}</span></button>)}</div>}
         <div className={section === "sources" ? "border-t border-slate-100 pt-3" : ""}>
@@ -130,6 +148,7 @@ export default function WorkspacePage() {
         </aside>}
       </div>
     </div>
+    </KnowledgeContainer>
     {params.get("add") === "1" && <AddSourceDialog onClose={() => setQuery({ add: null }, true)} onCreated={(kind, id) => { setParams({ item: `${kind}:${id}` }); }} />}
     {addingAction && <AddActionDialog onClose={() => setAddingAction(false)} />}
   </section>;

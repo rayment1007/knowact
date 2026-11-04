@@ -491,3 +491,4 @@ class AuditLog(OrganizationScopedMixin, Base):
 # Register the structured-fact tables for metadata/create_all without making
 # legacy KnowledgeItem rows implicit members of versioned fact memory.
 from app.core import fact_models as _fact_models  # noqa: E402,F401
+from app.core import fact_extraction_models as _fact_extraction_models  # noqa: E402,F401

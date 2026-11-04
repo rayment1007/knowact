@@ -94,7 +94,8 @@ describe("user-directed source drafting", () => {
     const user = userEvent.setup(); render(<App />);
     await user.click(screen.getByRole("button", { name: "Add to Knowledge" }));
     await screen.findByRole("button", { name: "Confirm and prepare draft" });
-    expect(calls).toHaveLength(1); expect(calls[0].body.acknowledge_sensitive).toBe(false);
+    const generationCalls = calls.filter(call => call.method === "POST");
+    expect(generationCalls).toHaveLength(1); expect(generationCalls[0].body.acknowledge_sensitive).toBe(false);
     await user.click(screen.getByRole("button", { name: "Confirm and prepare draft" }));
     await screen.findByLabelText("Summary");
     expect(calls.filter(c => c.method === "POST")[1].body.acknowledge_sensitive).toBe(true);

@@ -125,6 +125,9 @@ def summary(db: Session = Depends(get_db), user: User = Depends(get_current_user
         "action_reviews": review_counts["actions_reviews"],
         "draft_reviews": count(EmailDraft, EmailDraft.user_id == user.id, EmailDraft.status == "AI_SUGGESTED"),
         "source_reviews": review_counts["sources_reviews"],
+        "fact_reviews": review_counts["fact_reviews"],
+        "fact_unresolved": review_counts["fact_unresolved"],
+        "fact_current": review_counts["fact_current"],
     }
 
 

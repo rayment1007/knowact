@@ -13,5 +13,6 @@ import type { BusinessEntity } from "./types";
 export const businessEntitiesApi = {
   /** List the organization's business entities, newest first. */
   list: () => api.get<BusinessEntity[]>("/business-entities"),
+  createProject: (name: string) => api.post<BusinessEntity>("/business-entities", { name, entity_type: "PROJECT" }),
   remove: (id: string) => api.del<void>(`/business-entities/${id}`),
 };

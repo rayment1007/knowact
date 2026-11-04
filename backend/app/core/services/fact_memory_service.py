@@ -60,6 +60,15 @@ def _time(value):
     return value.replace(tzinfo=timezone.utc) if value and value.tzinfo is None else value
 
 
+def _assertion_risk(quote):
+    # Mask complete textual dates before checking modal "may" so the month
+    # May is not mistaken for uncertainty (17 May 2026 / May 17, 2026).
+    months = r"(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+    dates = rf"\b(?:\d{{1,2}}\s+{months}\s+\d{{4}}|{months}\s+\d{{1,2}},?\s+\d{{4}})\b"
+    wording = re.sub(dates, "<date>", quote, flags=re.I)
+    return bool(re.search(r"\b(?:not|never|might|may|could|should|would|propos\w*|suggest\w*|if|possibly|tentative\w*|cancelled|canceled|unconfirmed|uncertain|consider\w*|pending|withdrawn)\b|no longer|\?", wording, re.I))
+
+
 class FactMemoryService:
     def __init__(self, db, *, owner_id: UUID, org_id: UUID):
         self.db, self.owner_id, self.org_id = db, owner_id, org_id
@@ -179,6 +188,8 @@ class FactMemoryService:
             self.db.flush()
         elif evidence.redacted_at:
             _fail("This evidence was deleted. Select a fresh source.")
+        elif acknowledge_sensitive and not evidence.locator_json.get("sensitive_acknowledged"):
+            evidence.locator_json = {**evidence.locator_json, "sensitive_acknowledged": True}
         return evidence
 
     def propose(self, *, project_id, canonical_key, source_kind, source_id,
@@ -239,6 +250,11 @@ class FactMemoryService:
             _fail("The current fact's evidence was deleted. Resolve it before replacing it.")
 
     def _supported(self, proposal, head, evidence, snapshot, relationship):
+        context = proposal.extraction_context or {}
+        if context.get("identity_unverified") or context.get("requires_revalidation"):
+            _fail("Confirm this candidate's identity and evidence before comparing or approving it.")
+        if context and (context.get("modality") != "ASSERTION" or context.get("source_context") != "DIRECT"):
+            _fail("This candidate's statement needs clarification before approval.")
         if relationship == "NEW":
             if head is not None:
                 _fail("This identity already has an accepted version.")
@@ -251,7 +267,7 @@ class FactMemoryService:
             # Deliberately narrow M1 gate: complete explicit from/to dates,
             # replacement wording, and source chronology. Not a five-class AI.
             quote = evidence.excerpt or ""
-            if re.search(r"\b(?:not|never|might|may|could|should|propos\w*|suggest\w*|if)\b|\?", quote, re.I):
+            if _assertion_risk(quote):
                 _fail("This passage does not establish an explicit completed rescheduling.")
             pattern = (r"\b(?:rescheduled|moved|changed)\s+from\s+" + _date_pattern(head.value_json)
                 + r"\s+to\s+" + _date_pattern(proposal.value_json) + r"(?!\w)")
@@ -277,6 +293,8 @@ class FactMemoryService:
             raise HTTPException(422, "Invalid fact relationship.")
         with self._mutation():
             proposal = self._locked_proposal(proposal_id)
+            if (proposal.extraction_context or {}).get("resolved_candidate_id"):
+                _fail("Use the server comparison flow for resolved candidates.")
             self._editable(proposal, revision)
             head = self._head(proposal.identity_id)
             self._check_head(head, expected_head_id)
@@ -325,14 +343,20 @@ class FactMemoryService:
             if replay:
                 return replay
             self._editable(proposal, expected_revision)
+            from app.core.services.fact_resolution_service import validate_lineage, invalidate_candidate_resolutions
+            validate_lineage(self, proposal)
+            invalidate_candidate_resolutions(self, proposal, for_edit=True)
             source, old_evidence, _ = self._fresh_source(proposal)
             evidence = self._evidence(source, excerpt, value,
                 bool(old_evidence.locator_json.get("sensitive_acknowledged")))
             detail = {"before": proposal.value_json, "after": value,
                 "before_evidence_id": str(proposal.evidence_id), "evidence_id": str(evidence.id)}
             proposal.value_json, proposal.evidence_id = value, evidence.id
+            if proposal.extraction_context:
+                proposal.extraction_context = {**proposal.extraction_context, "requires_revalidation": True}
             proposal.revision += 1
             proposal.status, proposal.relationship, proposal.comparison_ready = "PENDING", "UNCLEAR", False
+            proposal.comparison_json = {}
             return self._record(proposal, revision=expected_revision, decision="EDIT",
                 request_key=request_key, payload=payload, detail=detail)
 
@@ -348,12 +372,18 @@ class FactMemoryService:
                 evidence_id=evidence.id, evidence_key=key))
 
     def review(self, proposal_id, *, expected_revision, expected_head_id,
-               expected_source_fingerprint, decision, request_key):
+               expected_source_fingerprint, decision, request_key, resolution_reason=None):
         if decision not in {"APPROVE", "REJECT", "KEEP_UNRESOLVED"}:
             raise HTTPException(422, "Invalid review decision.")
+        if resolution_reason is not None:
+            if not isinstance(resolution_reason, str) or len(resolution_reason) > 2000:
+                raise HTTPException(422, "Use at most 2,000 characters for the resolution reason.")
+            resolution_reason = resolution_reason.strip() or None
         payload = dict(proposal_id=str(proposal_id), revision=expected_revision,
             head_id=str(expected_head_id) if expected_head_id else None,
             source_fingerprint=expected_source_fingerprint, decision=decision)
+        if resolution_reason is not None:
+            payload["resolution_reason"] = resolution_reason
         with self._mutation():
             replay = self._replay(request_key, payload)
             if replay:
@@ -363,6 +393,10 @@ class FactMemoryService:
             if replay:
                 return replay
             self._editable(proposal, expected_revision)
+            from app.core.services.fact_resolution_service import (
+                FactResolutionService, validate_lineage, invalidate_candidate_resolutions,
+            )
+            lineage = validate_lineage(self, proposal)
             if decision == "APPROVE":
                 if not proposal.comparison_ready:
                     _fail("Compare this proposal again before approving it.")
@@ -372,8 +406,12 @@ class FactMemoryService:
                     _fail("The displayed comparison is stale. Reload it before approving.")
                 if not expected_source_fingerprint:
                     raise HTTPException(422, "The displayed source fingerprint is required.")
-                _, evidence, snapshot = self._fresh_source(proposal, expected_source_fingerprint)
-                self._supported(proposal, head, evidence, snapshot, proposal.relationship)
+                source, evidence, snapshot = self._fresh_source(proposal, expected_source_fingerprint)
+                if lineage:
+                    FactResolutionService(self.db, owner_id=self.owner_id, org_id=self.org_id).check_approval(
+                        proposal, head, source, evidence, snapshot, resolution_reason)
+                else:
+                    self._supported(proposal, head, evidence, snapshot, proposal.relationship)
                 if proposal.relationship == "SAME":
                     version = head
                 else:
@@ -390,8 +428,10 @@ class FactMemoryService:
                 self._link(version, evidence, snapshot)
                 proposal.status, proposal.result_version_id = "APPROVED", version.id
             elif decision == "REJECT":
+                invalidate_candidate_resolutions(self, proposal)
                 proposal.status = "REJECTED"
             else:
+                invalidate_candidate_resolutions(self, proposal)
                 proposal.status = "UNRESOLVED"
                 # Another tab must reload after a deliberate defer decision;
                 # an old Approve must not silently undo that newer review.
@@ -400,4 +440,7 @@ class FactMemoryService:
                 request_key=request_key, payload=payload,
                 detail={"value": proposal.value_json, "evidence_id": str(proposal.evidence_id),
                     "relationship": proposal.relationship,
-                    "expected_head_id": str(expected_head_id) if expected_head_id else None})
+                    "expected_head_id": str(expected_head_id) if expected_head_id else None,
+                    "comparison": proposal.comparison_json or {},
+                    "resolution_reason": resolution_reason,
+                    "candidate_id": str(lineage.candidate_id) if lineage else None})

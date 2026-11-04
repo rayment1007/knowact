@@ -215,6 +215,8 @@ def test_extract_persists_suggested_with_evidence(db_session: Session) -> None:
     assert knowledge.organization_id == org.id
     assert knowledge.evidence_text  # Requirement 6.6: non-empty
     assert knowledge.summary == "Milestone approved."
+    # A provider's old FACT label must not become a versioned project fact.
+    assert knowledge.knowledge_type == "CONTEXT"
 
 
 def test_extract_falls_back_to_content_when_evidence_empty(db_session: Session) -> None:

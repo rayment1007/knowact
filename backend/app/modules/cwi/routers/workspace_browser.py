@@ -153,6 +153,14 @@ def counts(db: Session = Depends(get_db), user: User = Depends(get_current_user)
         result[section] = db.scalar(select(func.count()).select_from(rows)) or 0
         result[section + "_reviews"] = db.scalar(select(func.count()).select_from(rows).where(
             rows.c.status == ("NEEDS_REVIEW" if section == "sources" else "SUGGESTED"))) or 0
+    from app.core.services.fact_extraction_service import enabled
+    if enabled():
+        from app.core.services.fact_memory_views import counts as fact_counts
+        facts = fact_counts(db, user)
+        result.update(fact_reviews=facts["needs_review"], fact_unresolved=facts["unresolved"],
+                      fact_current=facts["current"])
+    else:
+        result.update(fact_reviews=0, fact_unresolved=0, fact_current=0)
     return result
 
 

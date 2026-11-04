@@ -1,8 +1,8 @@
 # KnowAct report implementation tasks
 
-更新日期：2026-11-03（Asia/Kuala_Lumpur；初次审计 2026-11-01）  
-代码基线：`2bd0478` — Allow reimport after local removal and add calendar source deletion  
-当前状态：**Phase 1 与 Phase 2 的 M1 事实版本/审核基础已通过本地验证。完整 D3 内容清除仍待 Phase 6，M1 的 AI 提取和审核界面待 Phase 3–4。生产迁移和部署尚未执行。**
+更新日期：2026-11-04（Asia/Kuala_Lumpur；初次审计 2026-11-01）
+代码基线：`ad6ca1b` — feat(memory): complete phase 1 and phase 2 foundations（初次审计基线 `2bd0478`）
+当前状态：**Phase 4 的 M1 会议日期冲突审核链路已实现并通过本地回归：明确身份 → 五类规则比较 → 独立人工审核 → Current / History。完整 Phase 4 仍有语义匹配、其他事实类型和复杂时间规则待扩展；Copilot 整合待 Phase 5，完整 D3 待 Phase 6。新入口仍为默认关闭的开发功能，浏览器端到端、生产迁移和部署尚未验证/执行。**
 
 本文件是后续开发的主任务清单。目标是逐步实现用户本次提供的 `KnowAct_FYP_Report_Formatted_v4.docx` 中的产品行为，优先完成 Conflict-Aware Project Memory，并保留现有 Sources → Knowledge / Actions 工作流程。完整需求及代码差距见 [Report v4 gap audit](docs/plans/REPORT_V4_GAP_AUDIT.md)。
 
@@ -13,7 +13,7 @@
 - 产品对象是个人 IT Project Coordinator；保留 Dashboard / Workspace → Sources、Knowledge、Actions，以及 Search、Copilot、Settings。
 - 支持 Gmail、Google Calendar、英文 text-based PDF / DOCX / TXT、manual notes。暂不增加连接器、团队审批、模型训练或知识图谱平台。
 - report v4 是需求范围依据；GPT 建议和 TXT 是待审查的设计输入，不能当成已实现或已验证的事实。
-- 用户已要求完成 Phase 1 后继续 Phase 2；本次实施 Phase 2 的 M1 数据和审核基础，不一次实施全部阶段。
+- 用户已要求继续 Phase 4；本次完成 M1 的身份确认、比较与审核链路，不自动进入 Phase 5 或部署。
 - **用户已确认 D3**：普通 Remove 删除本地原始 source，清楚告知保留已批准事实所需的最少 evidence 片段；Purge 清除相关内容副本、evidence text、embedding 和 AI logs，受影响历史显示 evidence removed。两者都不删除 Google 端资料。具体实现属于 Phase 2/6。
 - 一个阶段可以分成多个小批次。每个批次必须交代实际改动、验证结果、遗留问题和下一步，并更新本文件。
 
@@ -56,8 +56,8 @@ FactTrack 可作为原子事实和时间有效性设计的参考，其研究任�
 | Phase 0 | 本次需求/代码审计和任务计划 | 25 FR、8 NFR、3 objectives | 完成；用户已批准进入 Phase 1 |
 | Phase 1 | 固定事实契约，补个人隔离和审核基线 | FR-13/14/20/22/24，NFR-02/04 | 本地实现与验证完成 |
 | Phase 2 | 事实身份、不可变版本、证据、review 和事务 | FR-09/13/14/15/23 | M1 基础本地验收完成；P2-08 全量 D3 清除与 Phase 6 联合完成 |
-| Phase 3 | 选定 source 的结构化提取与项目归属 | FR-04/05/10/25 | 待开始 |
-| Phase 4 | 五类比较、冲突审核、版本历史 UI | FR-11–15/23 | 待开始 |
+| Phase 3 | 选定 source 的结构化提取与项目归属 | FR-04/05/10/25 | M1 meeting-date 提取与候选编辑本地完成；其他 fact types 尚待扩展 |
+| Phase 4 | 五类比较、冲突审核、版本历史 UI | FR-11–15/23 | M1 date-only 审核链路本地完成；语义匹配、其他类型和复杂时间待扩展，浏览器演示未验证 |
 | Phase 5 | Copilot / Search / Brief 使用当前事实 | FR-06–09/16/23 | 待开始 |
 | Phase 6 | 补齐其他 report 功能和外部操作追踪 | FR-01–05/16–22/23/25 | 待开始 |
 | Phase 7 | 完整评估、失败恢复及性能记录 | §3.6，全部 NFR | 待开始 |
@@ -131,34 +131,40 @@ P2-08 **部分完成**：已审计内容存储，建立稳定 origin、原始来
 
 **目的：** 扩展现有 Add to Knowledge，让用户看到摘要及逐项可编辑、有证据的事实候选。
 
-- [ ] P3-01 使用现有 `/workspace/source/{kind}/{id}/proposals` 入口；扩展 provider schema 返回 summary + 0..N atomic fact candidates，不把 narrative summary 强当成一个 fact。
-- [ ] P3-02 选定/确认当前用户的项目；AI 可建议项目归属，但不能偷偷创建项目或把 Unassigned 当作所有项目。
-- [ ] P3-03 四类 source 统一输入契约：Gmail 原文、Calendar event identity/date/time、document text/chunk/page、manual note revision。保留每一来源自身的时间及 locator。
-- [ ] P3-04 输出 fact type/key/value、statement modality（assertion/proposal/question/uncertain）、previous value / change cue（若有）、evidence 与时间精度；标注模型声称与用户 confirmed 的区别。
-- [ ] P3-05 规则验证 JSON 类型、原文 quote、关键值及定位；拒绝编造证据、日期补全和不支持的类型。0 facts 是正常结果；AI failure 是可重试错误。
+- [x] P3-01 使用现有 `/workspace/source/{kind}/{id}/proposals` 入口；扩展 provider schema 返回 summary + 0..N atomic fact candidates，不把 narrative summary 强当成一个 fact。
+- [x] P3-02 选定/确认当前用户的项目；AI 可建议项目归属，但不能偷偷创建项目或把 Unassigned 当作所有项目。
+- [x] P3-03 四类 source 统一输入契约：Gmail 原文、Calendar event identity/date/time、document text/chunk/page、manual note revision。保留每一来源自身的时间及 locator。
+- [x] P3-04 输出 fact type/key/value、statement modality（assertion/proposal/question/uncertain）、previous value / change cue（若有）、evidence 与时间精度；标注模型声称与用户 confirmed 的区别。
+- [x] P3-05 规则验证 JSON 类型、原文 quote、关键值及定位；拒绝编造证据、日期补全和不支持的类型。0 facts 是正常结果；AI failure 是可重试错误。
 - [ ] P3-06 区分 repeated event、多人负责、状态范围、forwarded/quoted 旧内容、否定句与修订公告。证据不足保持待澄清，不能猜成确定事实。
-- [ ] P3-07 用户可以编辑逐个候选；保存编辑仍 Unconfirmed，并使旧比较结果失效/重新计算。需要更换证据或记录用户声明时，UI 明确说明。
-- [ ] P3-08 长文采用按段/页提取、有限预算与重复事实合并；任何部分分析清楚标注覆盖范围。当前 24,000 字符限制不能被隐藏成“全文已检查”。
-- [ ] P3-09 用户主动 regenerate、同一 source 重复点击和相同内容 reimport 不产生无限草稿；缓存基于 owner、source revision、extractor/schema version，失败不污染成功结果。
-- [ ] P3-10 所有事实候选交给 Phase 2 服务；既有 action draft 路径保持独立。对没有适合五类事实的资料，保留 general knowledge summary 流程。
+- [x] P3-07 用户可以编辑逐个候选；保存编辑仍 Unconfirmed，并使旧比较结果失效/重新计算。需要更换证据或记录用户声明时，UI 明确说明。
+- [x] P3-08 长文采用按段/页提取、有限预算与重复事实合并；任何部分分析清楚标注覆盖范围。当前 24,000 字符限制不能被隐藏成“全文已检查”。
+- [x] P3-09 用户主动 regenerate、同一 source 重复点击和相同内容 reimport 不产生无限草稿；缓存基于 owner、source revision、extractor/schema version，失败不污染成功结果。
+- [x] P3-10 所有事实候选交给 Phase 2 服务；既有 action draft 路径保持独立。对没有适合五类事实的资料，保留 general knowledge summary 流程。
 
 **验收：** Gmail / Calendar / PDF / DOCX / TXT / note 的合成样例都能生成正确来源的候选或明确的 0-fact / failure 结果；无 approval 不新增 confirmed fact；Sync 本身不调用此提取流程。
+
+**2026-11-03 M1 验收边界：** 已完成项按 MEETING_TIME + complete DATE 范围验收。Gmail、Calendar、文件 chunks、note 共用来源契约；time-specific Calendar 明确保留待澄清，不降为 all-day 日期。文件流程和既有 PDF/DOCX/TXT parser 回归通过不等于已实测各种真实文件的 LLM 提取质量。P3-06 中转发/引用、否定、提议、问题、重复会议和缺年份均保守保留澄清；多人负责、项目状态范围等其他事实类型未完成，保持该项开放。
+
+Summary + 0..N candidates 已接原入口；提取候选使用 provisional identity，不能直接批准。只有来源支持的完整日期断言会交给 Phase 2 pending service；缺值/语义不确定者保留在 extraction result，不伪造日期以满足数据库。Edit 保存仍未确认，需重新验证。Phase 4 已接入与原候选关联的 resolved proposal，保留其既有 EDIT/review 历史，不原地改写 identity。详见 [Phase 3 implementation and limits](docs/plans/PHASE3_SELECTED_SOURCE_EXTRACTION.md) 和 [Phase 4 M1](docs/plans/PHASE4_M1_CONFLICT_REVIEW.md)。
 
 ## Phase 4 身份匹配、五类比较和冲突审核
 
 **目的：** 形成从 source 到可解释的版本化 memory 的完整用户流程。
 
-- [ ] P4-01 在 owner + project 内先找 canonical identity / 已审核 alias，再取有界语义候选。相似度只选候选；无可靠 identity 时不强制合并。
-- [ ] P4-02 先用确定性 normalization 判断 New / Same；语义变体、Revision / Conflict / Unclear 使用值、modality、来源上下文、适用时间和必要的 LLM 辅助。记录理由及规则/模型版本。
-- [ ] P4-03 区分当前值不兼容、历史状态变化、将来才生效、明确替换、旧通知迟到、周期事件及集合值。出现“rescheduled”但不对应当前版本时不能盲目替换。
-- [ ] P4-04 一个 source 内部矛盾、多份 pending proposals、多个相似 facts 均有可解释结果。即使最初为 New，批准时也重新检查 head，避免两个 New 同时成为重复 current。
-- [ ] P4-05 Workspace → Knowledge 增加 Needs review / Current / History 与关系筛选。沿用现有侧栏、列表、detail panel，不增加无必要的大导航。
-- [ ] P4-06 Detail 展示 project / identity、current vs proposed value、关系/理由、双方证据和时间、待决定事项；允许纠正错误匹配或切换项目后重新比较。
-- [ ] P4-07 按结果提供明确操作：approve new、approve reviewed replacement、save edit、reject、keep unresolved。Conflict / Unclear 先明确解析 identity/value 和选择依据；不自动选最新/多数来源。
-- [ ] P4-08 History 展示每版值、前驱、当时证据、reviewer、时间和决定；同一事实的旧 confirmed 版本以 superseded 展示。
-- [ ] P4-09 Dashboard / review counts 与 unresolved 警示由真实记录计算。Invalidate 受影响的列表、详情、summary；普通页面导航不触发 sync。
-- [ ] P4-10 多标签页/旧缓存批准返回 stale 解释和重新载入入口；不能覆盖用户尚未保存的编辑。
-- [ ] P4-11 将旧 extraction / confirm 入口接入统一事实规则或限制为明确 legacy context。任何 structured fact 都不能从旁路直接创建 confirmed state。
+- [ ] P4-01 **部分完成：** owner + project 内明确选择已有 identity 或输入 canonical meeting/occurrence，规范化 exact key 并在事务中复用。已审核 alias 和有界语义候选未做；不自动合并相似名称。
+- [ ] P4-02 **M1 已完成：** 完整会议日期的 New / Same / Revision / Conflict / Unclear 规则、理由和 rule version。语义变体及 LLM 辅助比较未做。
+- [ ] P4-03 **部分完成：** 明确 from/to、来源先后、旧通知与 current 不匹配、问题/否定/引用均有规则。未知来源时间需人工说明；时刻、未来生效区间、周期事件自动解析、集合值和其他类型未做。
+- [ ] P4-04 **M1 已完成：** 同源矛盾、同 identity 多个 pending、批准时重查 head/证据，并发 NEW 只有一个 Current。多个相似事实的自动候选发现依赖 P4-01，保持开放。
+- [x] P4-05 Workspace → Knowledge 增加 Project facts 的 Needs review / Current / History、关系/项目筛选、搜索和分页；默认关闭的开发功能。
+- [x] P4-06 M1 Detail 展示项目/identity、current/proposed、理由、双方证据和时间；支持重新匹配项目/会议，保留原候选历史。
+- [x] P4-07 M1 提供 approve、save edit、reject、keep unresolved。可人工解决的 Conflict / Unclear 需明确理由；证据不支持的候选不能靠理由绕过验证。
+- [x] P4-08 History 显示每版值、前驱、证据、reviewer、时间和决定，旧版本标 Superseded；证据和审核历史分别分页。
+- [x] P4-09 Dashboard / Reviews 从真实记录计算 fact reviews/unresolved；写入使相关缓存失效，不因页面导航自动 sync。
+- [x] P4-10 stale head/source/revision 返回可解释拒绝；UI 保留未保存内容并支持 reload / compare again。历史匹配失效可返回原候选重新处理。
+- [x] P4-11 旧提取/确认入口的新 summary 明确为 CONTEXT，不创建 accepted FactVersion；历史已确认 Knowledge 不被静默转换为原子事实。
+
+以上勾选按 **M1 date-only 开发范围**完成，不代表完整 report 范围已交付。规则矩阵、迁移边界和演示步骤见 [Phase 4 M1 implementation](docs/plans/PHASE4_M1_CONFLICT_REVIEW.md)。
 
 **验收：** 五类关系各有可复现例子；New / Revision / Conflict / Unclear 均不自动改变 current；Same 不增加版本；身份错误可修正；批准替换后旧证据/版本仍可查看；取消外部操作不会调用 Google 写接口。
 
@@ -271,7 +277,7 @@ Next concrete task:
 - 已确认决定：无固定截止日；selected-source extraction first；Summary 与逐项 Fact 独立批准；M1 先做一个项目的 UAT date Revision；可选公平 LLM-only baseline；D3 双层删除。
 - 下一具体任务：Phase 2 先列出 D3 涉及的内容存储与 lineage，再实现 M1 最小 FactIdentity / accepted version / proposal / evidence / review 事务。用可控候选验证 17 Sep → 18 Sep、Reject/Edit 不改旧值、stale head/source 拒绝及重复批准幂等，再接入选定 Email 提取和 review UI。
 
-### 当前 checkpoint：Phase 2 M1 基础
+### Phase 2 M1 完成 checkpoint（历史记录）
 
 - 日期 / 代码：2026-11-03；基线仍为 `2bd0478`，Phase 1/2 改动均未提交或 push；保留已有无关文件。
 - 完成范围：P2-01–07、P2-09–10 的 M1 基础。P2-08 保持部分完成，不能把内部事实层 redaction 当成整个 workspace 的 Purge。
@@ -286,3 +292,32 @@ Next concrete task:
 - 未执行：Neon schema migration/生产 inventory、live OpenAI、Google writes、前端新 Conflict 页面、浏览器端到端、Render/Vercel 部署。本轮未改前端，所以没有重新运行 Phase 1 已通过的前端 suite/build。0014/0015 都未应用到 Neon，新后端不能直接用于旧 schema。
 - 结论：**版本和人工审核基础可用于接入 M1；尚不是自动 Conflict Detection，也不是完整 Conflict MVP。** 规则只对受控 complete-date 候选作窄门检查，不能拿这些测试当作 AI extraction/relationship accuracy。
 - 下一具体任务：Phase 3 的 M1 小批次：用户选定 Email + 明确 Project → General Summary + 0..N 独立的 meeting-date proposals；接已有 owner/source/fingerprint/evidence/review 服务，先实现 schema-validation、grounding、失败状态和去重，再在 Phase 4 接审核 UI 与比较。避免在可见 MVP 前扩展所有 fact types。
+
+### Phase 3 M1 提取与候选编辑 checkpoint（历史记录）
+
+- 日期 / 代码：2026-11-03；开始时 Phase 1/2 已提交为 `ad6ca1b`。本轮 Phase 3 未提交、push 或部署；保留用户已有 `collected_code.txt`、artifacts、临时文件等无关改动。
+- 实现：扩展原 Add to Knowledge 入口为 general summary 或明确 PROJECT + summary/facts；支持用户手动创建项目。严格 provider schema 返回叙述摘要与 0..N 个 date-only MEETING_TIME 候选，记录原值、完整规范日期、modality、previous value/change cue、来源上下文和证据。
+- 审核边界：摘要可单独编辑/批准为 CONTEXT，并带所选 project；不生成 FactVersion、不批准候选。完整且有原文支持的候选交 Phase 2 pending service，使用 unverified provisional identity；正式比较/批准被 guard 阻止，等待 Phase 4 解析身份。用户可编辑完整日期与精确 passage，保持 unconfirmed 并记录需重新验证。
+- 保守处理：未知年份、问题、提议、否定、转发/引用、未明确 occurrence 的重复会议、time-specific Calendar 都保留澄清。其他事实类型尚不提取；不能把合成案例通过率当作五类关系检测或真实 LLM 准确率。
+- 缓存 / 失败：owner/project/origin/full fingerprint/extractor/schema/provider/model 隔离缓存；request receipts 覆盖缓存命中并绑定意图；同请求并发只调用一次 provider；同 key 不同来源返回 409。失败保留无原文异常的 FAILED receipt，0 facts 是成功；重试明确失败用新 key，未知网络结果保留原 key。重导入可复用分析输出但建立新的本地 pending 来源/候选，不复活已删除原文或审批。
+- 范围 / 成本：最多 3 个 8,000 字符分段，总预算不超过 24,000；显示实际 ranges/覆盖量/partial。完整指纹仍覆盖省略部分，文件尾部改动会使旧审批过期。每 owner/project/origin/content/extractor revision 最多 3 次生成尝试（含失败/重导入）；这是开发阶段成本上限，不代表正式性能/成本评估。
+- 隐私 / 权限：缓存和重试前重新检查 owner/project/source eligibility；生成期间来源变化/删除不发布旧提议。来源后来变为 highly sensitive 时重新要求明确确认，并把对未变缓存内容的新确认保留到摘要/证据，编辑与摘要审批不会反复卡在旧确认状态。
+- 存储：新增 `0016_fact_extraction_runs`，FactExtractionRun / FactExtractionRequest 和 FactProposal.extraction_context；最小 snapshot 让 0-fact/failed 结果也有 purge origin。内部 fact-layer redaction 清除新 output/coverage/context；完整 D3 与 general-summary purge 并发协调仍待 Phase 6。
+- 前端：项目选择/创建、覆盖范围、0-fact/澄清/候选状态、独立日期与证据编辑、摘要单独批准；候选修改使相关缓存失效，不覆盖未保存摘要。Enter 不会误触摘要批准；失败重试与 evidence removed 显示有回归测试。
+- 验证：**完整 backend 584 passed**（真实 PostgreSQL 0014/0015/0016、并发与回滚）；之后补充边界/隐私检查的 **82 项专项 passed**。后者与全量重叠并包含后加测试，不能相加当成独立用例总数。**frontend 104 passed**，`npm run build` 通过；编译、Alembic 单一 head 与 tracked diff whitespace checks 通过。
+- 未执行 / 限制：没有 live OpenAI 质量/延迟/费用验证，没有浏览器端到端，没有 Google writes，没有生产 schema/inventory 检查，没有 Neon 迁移/Render/Vercel 部署。开发入口默认关闭，PRODUCTION 强制关闭；0016 未在本轮应用到 Neon，运行本 checkout 前需验证目标数据库有完整 schema。
+- 下一具体任务：Phase 4 的 M1 身份解析与审核：先让用户确认 UAT occurrence/identity，把候选解析为有 lineage 的新 proposal；取同 owner/project 的已批准当前值，展示 New/Same/Revision/Conflict/Unclear 的理由与双方证据，先打通 17 Sep → 18 Sep 的可见版本审批。不要重写已有 candidate identity/EDIT 历史，也不要先扩展全部事实类型拖延 M1。
+
+### 当前 checkpoint：Phase 4 M1 冲突审核链路
+
+- 日期 / 代码：2026-11-04；基线 `ad6ca1b`。Phase 3/4 改动保留在本地，未提交、push 或部署；无关用户文件保持原样。
+- 已实现：选定 source → summary + 独立候选 → 用户明确匹配 project/meeting/occurrence → 服务器规则比较 → 人工审核 → versioned memory。17 Sep → 明确较新 18 Sep 的 Email 流程通过真实 HTTP 路由测试；20 Sep 的不兼容来源可保留 unresolved，Current 不变。Summary approval 不确认 facts。
+- 身份：新增 FactResolution，原 provisional identity/EDIT 历史不重写；rematch 建新的关联 proposal，使旧匹配失效。已批准关联禁止重新解释。请求幂等、owner/project 隔离及审批/重匹配竞争有 PostgreSQL 验证。
+- 比较：完整日期 MEETING_TIME 的五类规则，记录 rule_version/reasons；明确替换必须对应现有 Current 且有可靠较新来源时间。延迟旧通知、未知/同时来源时间需人工选择依据；问题、否定、取消、引用、错误日期证据不能直接批准。Same 只增加审核过的支持证据。
+- UI：Knowledge 的 General knowledge / Project facts、Needs review / Current / History、筛选搜索分页、current/proposed 对照、逐项编辑/批准/拒绝/保留未决、版本与证据/审核历史。Dashboard 和 Reviews 接事实待办；Source 卡片显示 active resolution 的值、证据和状态，不篡改原候选。
+- 防旧状态：批准重新验证 source fingerprint、proposal revision、current head、有效匹配和比较；UI 保留未保存编辑，提供重新比较和失效匹配恢复。修正取消语句经编辑绕过提取验证的问题，并加回归用例。
+- 迁移：新增 `0017_fact_resolution`，比较 JSON、不可变 resolution lineage、content-free comparison request receipts。真实本地 PostgreSQL 验证 upgrade/downgrade/re-upgrade、复合 FK、唯一 active match 和并发事务；0017 是单一 Alembic head。
+- 验证：完整 backend **625 passed**（含真实独立 PostgreSQL 测试）；最后 Source 展示修正后，extraction + HTTP workflow 专项 **33 passed**。frontend 完整 **113 passed**；另补 Source 审核显示与 Dashboard 计数回归后，相关 **20 passed**，随后 production build 再次通过。专项与全量有重叠，不相加称作总成绩。
+- 未验证：浏览器工具无法连接本机 browser/native host，故没有真实页面视觉或登录后端到端验证；未调用 live OpenAI、未写 Google、未访问/迁移 Neon、未部署 Render/Vercel。合成数据与 fake provider 测试不等于真实 LLM 准确率。
+- 剩余：完整 Phase 4 的语义身份候选/alias、LLM 辅助比较、其他事实类型、复杂时间/集合规则；完整 D3 仍待 Phase 6，Copilot/Search 尚未读取新 FactVersion（Phase 5）。
+- 下一具体任务：先在隔离开发环境演示 M1 页面并核对实际 AI 提取；按 report 继续 P4-01–04 的扩展。不要把 M1 本地完成写成完整 Conflict Feature 或已上线，也不要自动跳到 Phase 5。
